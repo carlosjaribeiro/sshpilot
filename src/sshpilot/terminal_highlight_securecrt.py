@@ -1,6 +1,6 @@
 """SecureCRT-compatible Cisco keyword rules, themes, and custom-rule loading.
 
-The 51 entries in :data:`SECURECRT_RULES` are the non-comment rules of
+The 51 entries in :data:`SECURECRT_RULES` are the non-label rules of
 SecureCRT's ``Cisco Words`` list, verbatim and in source order. They run
 case-insensitively (``Match Case`` off) on one complete line at a time, so
 ``^``/``$`` mean line start/end; later rules override earlier ones. The line
@@ -228,6 +228,9 @@ _MAX_FILE_BYTES = 256 * 1024
 _MAX_RULES = 500
 _MAX_REPEAT = 32
 _MATCH_CASE = re.compile(r'^\s*D:"Match Case"=([0-9A-Fa-f]{8})\s*$', re.MULTILINE)
+_LIST_HEADER = re.compile(r'^Z:"Keyword List (V\d+)"=')
+_SETTING = re.compile(r'^[A-Z]:"')
+_V3_ENABLED, _V3_BOLD = 0x1, 0x8  # F1 bits; F2 is not interpreted (see docs)
 _TOKEN = re.compile(
     r"""(?P<atom>\\x[0-9A-Fa-f]{2}|\\[dDwWsStnr]|\\[^0-9A-Za-z]
               |\[\^?\]?(?:\\.|[^\]\\])*\]|[^\\\[\](){}|^$*+?])
@@ -293,7 +296,9 @@ def load_rules(path: Optional[Path] = None) -> List[SecureCRTRule]:
 
     With no path, the first ``highlight_rules.*`` file in sshPilot's config
     directory is loaded. Simple rows are ``"regex",role-or-#RRGGBB[,bold]``.
-    SecureCRT ``00BBGGRR`` rows are imported as literal RGB colours. Rules
+    SecureCRT ``00BBGGRR`` rows are imported as literal RGB colours. In a
+    SecureCRT export the ``Keyword List V3`` section is used (V2 is ignored):
+    rows are ``"regex",COLORREF,F1,F2``; F1 bit 0 enables, bit 3 is bold. Rules
     are case-insensitive unless the file says ``D:"Match Case"=00000001``.
     Never raises: an unreadable, oversized or undecodable file gives ``[]``.
     """
@@ -312,8 +317,17 @@ def load_rules(path: Optional[Path] = None) -> List[SecureCRTRule]:
     flag = _MATCH_CASE.search(text)
     match_case = bool(flag and int(flag.group(1), 16))
     rules: List[SecureCRTRule] = []
+    has_v3 = 'Z:"Keyword List V3"' in text
+    version = None
     for line_number, line in enumerate(text.splitlines(), 1):
-        if not line.strip() or line.lstrip().startswith("#") or _MATCH_CASE.fullmatch(line):
+        header = _LIST_HEADER.match(line)
+        if header:
+            version = header.group(1)
+        if header or _SETTING.match(line):
+            continue
+        if has_v3 and version != "V3":  # V2 is the legacy copy of the same list
+            continue
+        if not line.strip() or line.lstrip().startswith("#"):
             continue
         if len(rules) == _MAX_RULES:
             logger.warning("Ignoring highlight rules after the first %d in %s", _MAX_RULES, path)
@@ -324,7 +338,13 @@ def load_rules(path: Optional[Path] = None) -> List[SecureCRTRule]:
             if source.startswith("[*]"):
                 continue
             target = row[1].strip().split()[0]
-            bold = any(value.strip().lower() in {"bold", "true", "1"} for value in row[2:])
+            if version == "V3":
+                flags = int(row[2], 16)
+                if not flags & _V3_ENABLED:
+                    continue
+                bold = bool(flags & _V3_BOLD)
+            else:
+                bold = any(value.strip().lower() in {"bold", "true", "1"} for value in row[2:])
             known = _BUILTIN.get(source)
             if known and known.role == "default":
                 role = "default"
