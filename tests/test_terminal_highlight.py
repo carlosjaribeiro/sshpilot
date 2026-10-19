@@ -1,12 +1,29 @@
 """Network-output highlighter: profiles, chunking, SGR state, pass-through."""
 
+import csv
 import re
+import time
+from pathlib import Path
 
 import pytest
 
-from sshpilot.terminal_highlight import PROFILES, Highlighter, apply_config, normalize_profile
+from sshpilot.terminal_highlight import (
+    PROFILES,
+    THEMES,
+    Highlighter,
+    apply_config,
+    normalize_profile,
+    normalize_theme,
+)
+from sshpilot.terminal_highlight_securecrt import (
+    SECURECRT_RULES,
+    colourref_to_rgb,
+    load_rules,
+    style_bytes,
+)
 
-SGR = re.compile(rb"\x1b\[(?:36|35|34|33|32|31|39)m")
+SGR = re.compile(rb"\x1b\[[0-9;]*m")
+LEGACY_PROFILES = tuple(profile for profile in PROFILES if profile != "cisco-securecrt")
 
 
 def colour(text, code):
@@ -40,7 +57,7 @@ def strip(data):
         (b"VLAN0010", 34),
     ],
 )
-@pytest.mark.parametrize("profile", PROFILES)
+@pytest.mark.parametrize("profile", LEGACY_PROFILES)
 def test_generic_tokens_in_every_profile(profile, text, code):
     assert run(profile, b"x " + text + b" y") == b"x " + colour(text, code) + b" y"
 
@@ -803,3 +820,210 @@ def test_apply_highlight_settings_logs_state_at_debug(caplog):
     with caplog.at_level(logging.DEBUG, logger="sshpilot.terminal"):
         TerminalWidget._apply_highlight_settings(w)
     assert "Output highlighting enabled=True profile=junos" in caplog.text
+
+
+# --- SecureCRT Cisco profile -------------------------------------------------
+
+
+def truecolour(text, rgb, *, bold=False):
+    prefix = b"1;" if bold else b""
+    close = b"\x1b[22;39m" if bold else b"\x1b[39m"
+    return b"\x1b[" + prefix + b"38;2;%d;%d;%dm" % rgb + text + close
+
+
+def test_securecrt_fixture_maps_every_non_comment_rule_in_order():
+    fixture = Path(__file__).with_name("data") / "securecrt-cisco-words.txt"
+    source = []
+    for line in fixture.read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        pattern = next(csv.reader([line], skipinitialspace=True))[0]
+        if not pattern.startswith("[*]"):
+            source.append(pattern)
+    assert len(source) == 51
+    assert [rule.source for rule in SECURECRT_RULES] == source
+
+
+def test_securecrt_bgr_conversion():
+    assert colourref_to_rgb("00d26900") == (0, 105, 210)
+    assert colourref_to_rgb("004080ff") == (255, 128, 64)
+
+
+@pytest.mark.parametrize(
+    "theme, opening",
+    [
+        ("securecrt", b"\x1b[38;2;0;174;0m"),
+        ("dark", b"\x1b[38;2;80;230;110m"),
+        ("light", b"\x1b[38;2;0;115;25m"),
+        ("high-contrast", b"\x1b[38;2;0;255;0m"),
+        ("terminal-palette", b"\x1b[36m"),
+    ],
+)
+def test_securecrt_each_theme_and_no_colour_leakage(theme, opening):
+    out = Highlighter("cisco-securecrt", theme=theme).feed(b"10.212.136.11 tail")
+    assert out == opening + b"10.212.136.11" + b"\x1b[39m tail"
+    assert normalize_theme(theme) == theme
+
+
+def test_securecrt_captured_cisco_output_exact_roles():
+    data = (
+        b"Oct 19 16:42:07.935: %SYS-5-CONFIG_I: Configured from console by axians "
+        b"on vty1 (10.212.136.11)\r\n"
+        b"%LINEPROTO-5-UPDOWN: Line protocol on Interface GigabitEthernet0/3, "
+        b"changed state to down\r\n"
+        b"%SW_MATM-4-MACFLAP_NOTIF: Host ec8e.7717.60c9 in vlan 668 is flapping "
+        b"between port Gi0/10 and port Gi0/28\r\n"
+        b"SW-PISO-2_01#show ip interface brief\r\n"
+        b"Interface IP-Address OK? Method Status Protocol\r\n"
+        b"% Invalid input detected at '^' marker.\r\n"
+    )
+    out = run("cisco-securecrt", data)
+    assert strip(out) == data
+    assert truecolour(b"%SYS-5-CONFIG_I:", (255, 128, 64)) in out
+    assert truecolour(b"%LINEPROTO-5-UPDOWN:", (255, 128, 64)) in out
+    assert truecolour(b"%SW_MATM-4-MACFLAP_NOTIF:", (255, 128, 64)) in out
+    assert truecolour(b"10.212.136.11", (0, 174, 0)) in out
+    assert truecolour(b"ec8e.7717.60c9", (0, 128, 64)) in out
+    assert truecolour(b"SW-PISO-2_01#", (0, 105, 210)) in out
+    assert truecolour(b"Invalid", (255, 0, 0)) in out
+
+
+@pytest.mark.parametrize(
+    "text, coloured",
+    [
+        (b"no shutdown", True),
+        (b"snooping", False),
+        (b"Notification", False),
+        (b"configuration", False),
+        (b"description no uplink", True),
+        (b"des", True),
+        (b"des56", True),
+        (b"3des", False),
+        (b"des56x", False),
+    ],
+)
+def test_securecrt_plain_words_use_ascii_alphanumeric_boundaries(text, coloured):
+    out = run("cisco-securecrt", text)
+    assert (b"\x1b[" in out) is coloured
+    assert strip(out) == text
+
+
+def test_securecrt_plain_word_boundaries_exact_bytes():
+    red = lambda value: truecolour(value, (255, 0, 0))
+    misc = lambda value: truecolour(value, (128, 0, 0))
+    assert run("cisco-securecrt", b"no shutdown") == red(b"no") + b" " + red(b"shutdown")
+    assert run("cisco-securecrt", b"snooping") == b"snooping"
+    assert run("cisco-securecrt", b"Notification") == b"Notification"
+    assert run("cisco-securecrt", b"configuration") == b"configuration"
+    assert run("cisco-securecrt", b"description no uplink") == (
+        misc(b"description") + b" " + red(b"no") + b" uplink"
+    )
+    assert run("cisco-securecrt", b"des") == red(b"des")
+    assert run("cisco-securecrt", b"des56") == red(b"des56")
+    assert run("cisco-securecrt", b"3des") == b"3des"
+    assert run("cisco-securecrt", b"des56x") == b"des56x"
+
+
+def test_securecrt_word_boundaries_across_chunks_exact_bytes():
+    red_o = truecolour(b"o", (255, 0, 0))
+    assert run("cisco-securecrt", b"n", b"o shutdown") == (
+        b"n" + red_o + b" " + truecolour(b"shutdown", (255, 0, 0))
+    )
+    assert run("cisco-securecrt", b"Not", b"ification") == b"Notification"
+
+
+@pytest.mark.parametrize("cut", [1, 8, 20, 44, 72])
+def test_securecrt_captured_line_chunk_splits_preserve_bytes(cut):
+    line = (
+        b"%SW_MATM-4-MACFLAP_NOTIF: Host ec8e.7717.60c9 in vlan 668 is flapping "
+        b"between port Gi0/10 and port Gi0/28\r\n"
+    )
+    assert strip(run("cisco-securecrt", line[:cut], line[cut:])) == line
+
+
+def test_securecrt_later_rule_overrides_earlier_overlap():
+    out = run("cisco-securecrt", b"%FOO-3-FAIL_ERR:")
+    assert out == truecolour(b"%FOO-3-FAIL_ERR:", (255, 128, 64))
+
+
+def test_securecrt_progress_v3_bold_is_scoped():
+    out = run("cisco-securecrt", b"[### tail")
+    assert out == truecolour(b"[###", (0, 0, 255), bold=True) + b" tail"
+
+
+def test_securecrt_does_not_clobber_remote_colour_or_bold():
+    data = b"\x1b[31;1m10.212.136.11 no\x1b[0m 10.212.136.12"
+    out = run("cisco-securecrt", data)
+    assert out.startswith(b"\x1b[31;1m10.212.136.11 no\x1b[0m ")
+    assert out.endswith(truecolour(b"10.212.136.12", (0, 174, 0)))
+
+
+def test_securecrt_adversarial_32k_is_bounded():
+    data = (b"a" * 32767) + b"!"
+    started = time.monotonic()
+    out = run("cisco-securecrt", data)
+    assert time.monotonic() - started < 1.0
+    assert strip(out) == data
+
+
+def test_custom_loader_simple_securecrt_and_bad_regex(tmp_path, caplog):
+    path = tmp_path / "highlight_rules.conf"
+    path.write_text(
+        '"\\bhello\\b",good,bold\n'
+        '"no",000000ff\n'
+        '"(a+)+$",bad\n',
+        encoding="utf-8",
+    )
+    with caplog.at_level("WARNING"):
+        rules = load_rules(path)
+    assert [(rule.source, rule.role, rule.bold) for rule in rules] == [
+        (r"\bhello\b", "good", True),
+        ("no", "#ff0000", False),
+    ]
+    assert "Skipping invalid highlight rule" in caplog.text
+
+
+def test_securecrt_importer_loads_entire_source_fixture():
+    fixture = Path(__file__).with_name("data") / "securecrt-cisco-words.txt"
+    imported = load_rules(fixture)
+    assert len(imported) == 51
+    assert [rule.source for rule in imported] == [rule.source for rule in SECURECRT_RULES]
+    assert [style_bytes(rule.role, "securecrt", rule.bold) for rule in imported] == [
+        style_bytes(rule.role, "securecrt", rule.bold) for rule in SECURECRT_RULES
+    ]
+
+
+def test_custom_rules_are_discovered_from_config_dir(tmp_path, monkeypatch):
+    import sshpilot.terminal_highlight_securecrt as securecrt
+
+    (tmp_path / "highlight_rules.conf").write_text('"hello",good\n', encoding="utf-8")
+    monkeypatch.setattr(securecrt, "get_config_dir", lambda: tmp_path)
+    assert [rule.source for rule in securecrt.load_rules()] == ["hello"]
+    assert len(securecrt.compile_rules("securecrt")) == len(SECURECRT_RULES) + 1
+
+
+def test_apply_config_sets_securecrt_theme():
+    h = Highlighter(enabled=False)
+    apply_config(h, _Config(**{
+        "terminal.highlight_enabled": True,
+        "terminal.highlight_profile": "cisco-securecrt",
+        "terminal.highlight_theme": "light",
+    }))
+    assert (h.enabled, h.profile, h.theme) == (True, "cisco-securecrt", "light")
+    assert THEMES == ("securecrt", "dark", "light", "high-contrast", "terminal-palette")
+
+
+def test_highlight_defaults_and_preferences_handlers():
+    from sshpilot.core.settings.defaults import get_default_config
+    from sshpilot.preferences import PreferencesWindow
+
+    terminal = get_default_config()["terminal"]
+    assert terminal["highlight_theme"] == "securecrt"
+    config = type("Config", (), {"set_setting": lambda self, key, value: setattr(self, key, value)})()
+    prefs = PreferencesWindow.__new__(PreferencesWindow)
+    prefs.config = config
+    combo = type("Combo", (), {"get_selected": lambda self: 2})()
+    PreferencesWindow.on_highlight_profile_changed(prefs, combo, None)
+    assert config.__dict__["terminal.highlight_profile"] == "cisco-securecrt"
+    PreferencesWindow.on_highlight_theme_changed(prefs, combo, None)
+    assert config.__dict__["terminal.highlight_theme"] == "light"

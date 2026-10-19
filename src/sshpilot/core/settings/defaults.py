@@ -41,9 +41,10 @@ def get_default_config() -> Dict[str, Any]:
             'cursor_blink': 'system',
             # Colour IPs/MACs/VLANs/interfaces/status in output (see
             # terminal_highlight). Profile: 'generic' | 'cisco-ios' | 'junos'
-            # | 'huawei-vrp'.
+            # | 'cisco-securecrt' | 'huawei-vrp'.
             'highlight_enabled': False,
             'highlight_profile': 'generic',
+            'highlight_theme': 'securecrt',
             'audible_bell': False,
             'term': None,
             'pass_through_mode': False,

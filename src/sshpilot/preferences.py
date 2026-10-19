@@ -35,7 +35,7 @@ from .terminal_cursor import (
     normalize_cursor_blink,
     normalize_cursor_shape,
 )
-from .terminal_highlight import PROFILES, normalize_profile
+from .terminal_highlight import PROFILES, THEMES, normalize_profile, normalize_theme
 
 
 import gi
@@ -767,13 +767,30 @@ class PreferencesWindow(Adw.Window):
         self.highlight_profile_row = Adw.ComboRow()
         self.highlight_profile_row.set_title(_("Highlight Profile"))
         profile_model = Gtk.StringList()
-        for label in (_("Generic"), _("Cisco IOS"), _("Junos"), _("Huawei VRP")):
+        for label in (
+            _("Generic"), _("Cisco IOS"), _("Cisco (SecureCRT-style)"),
+            _("Junos"), _("Huawei VRP"),
+        ):
             profile_model.append(label)
         self.highlight_profile_row.set_model(profile_model)
         current = normalize_profile(self.config.get_setting('terminal.highlight_profile', None))
         self.highlight_profile_row.set_selected(PROFILES.index(current))
         self.highlight_profile_row.connect('notify::selected', self.on_highlight_profile_changed)
         group.add(self.highlight_profile_row)
+
+        self.highlight_theme_row = Adw.ComboRow()
+        self.highlight_theme_row.set_title(_("Highlight Colour Theme"))
+        theme_model = Gtk.StringList()
+        for label in (
+            _("SecureCRT"), _("Dark"), _("Light"), _("High Contrast"),
+            _("Terminal Palette"),
+        ):
+            theme_model.append(label)
+        self.highlight_theme_row.set_model(theme_model)
+        theme = normalize_theme(self.config.get_setting('terminal.highlight_theme', None))
+        self.highlight_theme_row.set_selected(THEMES.index(theme))
+        self.highlight_theme_row.connect('notify::selected', self.on_highlight_theme_changed)
+        group.add(self.highlight_theme_row)
 
         terminal_page.add(group)
 
@@ -784,6 +801,11 @@ class PreferencesWindow(Adw.Window):
         index = combo_row.get_selected()
         if 0 <= index < len(PROFILES):
             self.config.set_setting('terminal.highlight_profile', PROFILES[index])
+
+    def on_highlight_theme_changed(self, combo_row, _param):
+        index = combo_row.get_selected()
+        if 0 <= index < len(THEMES):
+            self.config.set_setting('terminal.highlight_theme', THEMES[index])
 
     def on_cursor_shape_changed(self, combo_row, _param):
         index = combo_row.get_selected()

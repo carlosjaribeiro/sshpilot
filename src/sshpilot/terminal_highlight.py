@@ -1,10 +1,10 @@
 """Colour network-device terminal output (IPs, MACs, VLANs, interfaces, ...).
 
 ``Highlighter.feed`` rewrites a display byte stream, adding zero-width SGR
-escapes around recognised tokens. It uses palette indices (``ESC[31m``..
-``ESC[36m``) so colours follow the terminal theme, and restores the default
-foreground with ``ESC[39m`` so no other attribute is disturbed. Visible text
-is never changed: stripping SGR from the output gives back the input.
+escapes around recognised tokens. Legacy profiles use palette indices; the
+SecureCRT profile supports truecolour role themes and a terminal-palette
+option. It restores the default foreground with ``ESC[39m`` so visible text is
+never changed: stripping injected SGR from the output gives back the input.
 
 Streaming rules:
 
@@ -27,9 +27,17 @@ from __future__ import annotations
 
 import ipaddress
 import re
-from typing import Callable, Dict, List, NamedTuple, Optional, Set
+from typing import Callable, Dict, List, NamedTuple, Optional, Set, Tuple
 
-PROFILES = ("generic", "cisco-ios", "junos", "huawei-vrp")
+from .terminal_highlight_securecrt import (
+    CompiledRule,
+    THEMES as THEMES,
+    compile_rules,
+    highlight_priority,
+    normalize_theme,
+)
+
+PROFILES = ("generic", "cisco-ios", "cisco-securecrt", "junos", "huawei-vrp")
 
 _RED, _GREEN, _YELLOW, _BLUE, _MAGENTA, _CYAN = 31, 32, 33, 34, 35, 36
 
@@ -187,22 +195,26 @@ def _rules(profile: str) -> List[Rule]:
 
 
 class _Compiled(NamedTuple):
-    regex: "re.Pattern[bytes]"
+    regex: Optional["re.Pattern[bytes]"]
     colours: Dict[str, bytes]
     validators: Dict[str, Validator]
+    priority_rules: Tuple[CompiledRule, ...]
 
 
-def _compile(profile: str) -> _Compiled:
+def _compile(profile: str, theme: str) -> _Compiled:
+    if profile == "cisco-securecrt":
+        return _Compiled(None, {}, {}, compile_rules(theme))
     rules = _rules(profile)
     pattern = "|".join(f"(?P<{r.name}>{r.pattern})" for r in rules)
     return _Compiled(
         re.compile(pattern.encode("ascii")),
         {r.name: b"\x1b[%dm" % r.colour for r in rules},
         {r.name: r.validate for r in rules if r.validate},
+        (),
     )
 
 
-_COMPILED: Dict[str, _Compiled] = {}
+_COMPILED: Dict[Tuple[str, str], _Compiled] = {}
 
 _NEXT_RE = re.compile(rb"\x1b|\xc2(?:[\x80-\x9f]|\Z)")
 _CSI_RE = re.compile(rb"(?:\x1b\[|\xc2\x9b)([0-?]*)([ -/]*)([@-~])")
@@ -228,27 +240,40 @@ def normalize_profile(value: object) -> str:
 class Highlighter:
     """Stateful stream rewriter; one instance per terminal."""
 
-    def __init__(self, profile: str = "generic", enabled: bool = True) -> None:
+    def __init__(self, profile: str = "generic", enabled: bool = True,
+                 theme: str = "securecrt") -> None:
         self.enabled = enabled
+        self.theme = normalize_theme(theme)
         self.set_profile(profile)
         self.reset()
 
     def set_profile(self, profile: str) -> None:
         self.profile = normalize_profile(profile)
-        if self.profile not in _COMPILED:
-            _COMPILED[self.profile] = _compile(self.profile)
-        self._compiled = _COMPILED[self.profile]
+        key = self.profile, self.theme
+        if key not in _COMPILED:
+            _COMPILED[key] = _compile(*key)
+        self._compiled = _COMPILED[key]
 
-    def configure(self, enabled: bool, profile: str) -> bytes:
+    def set_theme(self, theme: str) -> None:
+        self.theme = normalize_theme(theme)
+        self.set_profile(self.profile)
+
+    def configure(self, enabled: bool, profile: str, theme: Optional[str] = None) -> bytes:
         """Apply settings without losing stream state.
 
         Returns bytes that were held back and must now be displayed unchanged
         (non-empty only when switching off mid-escape).
         """
+        old_style = self.profile, self.theme
+        if theme is not None:
+            self.theme = normalize_theme(theme)
         self.set_profile(profile)
+        if old_style != (self.profile, self.theme):
+            self._line_rule = None
         flushed = b""
         if self.enabled != enabled:
             self._carry = self._ctx = b""
+            self._line_rule = None
             # The held bytes are on screen after this call either way; keep them
             # for parsing (the rest of the sequence may follow) but never re-emit.
             flushed = self._hold[self._shown:] if self.enabled else b""
@@ -264,10 +289,11 @@ class Highlighter:
         self._carry = b""
         self._ctx = b""  # plain text before the carry: lookbehind for validators
         self._shown = 0  # leading bytes of _hold already displayed
+        self._line_rule: Optional[Tuple[int, CompiledRule]] = None
         self._reset_sgr()
 
     def _reset_sgr(self) -> None:
-        self._fg = self._bg = self._reverse = self._conceal = False
+        self._fg = self._bg = self._reverse = self._conceal = self._bold = False
 
     def feed(self, data: bytes) -> bytes:
         if (
@@ -367,6 +393,10 @@ class Highlighter:
                 self._conceal = True
             elif code == 28:
                 self._conceal = False
+            elif code == 1:
+                self._bold = True
+            elif code in (21, 22):
+                self._bold = False
             elif code == 39:
                 self._fg = False
             elif code == 49:
@@ -395,12 +425,21 @@ class Highlighter:
             or self._reverse
             or self._conceal
         ):
+            if b"\n" in text or b"\r" in text:
+                self._line_rule = None
             return text
-        regex, colours, validators = self._compiled
+        regex, colours, validators, priority_rules = self._compiled
         full = ctx + carry + text
         skip = len(ctx) + len(carry)
+        if priority_rules:
+            result, self._line_rule = highlight_priority(
+                full, skip, priority_rules, self._line_rule, self._bold,
+            )
+            self._remember_tail(full, last)
+            return result
         parts: List[bytes] = []
         pos = 0
+        assert regex is not None
         for m in regex.finditer(full):
             if m.end() <= skip:
                 continue
@@ -413,17 +452,19 @@ class Highlighter:
             parts.append(full[start:m.end()])
             parts.append(b"\x1b[39m")
             pos = m.end()
+        self._remember_tail(full, last)
+        if not parts:
+            return text
+        parts.append(full[max(pos, skip):])
+        return b"".join(parts)
+
+    def _remember_tail(self, full: bytes, last: bool) -> None:
         if last:
             tail = _TAIL_RE.search(full, max(0, len(full) - _CARRY_MAX - 1)).group()
             if len(tail) <= _CARRY_MAX:
                 self._carry = tail
                 keep = len(full) - len(tail)
                 self._ctx = full[max(0, keep - _CTX_MAX):keep]
-        if not parts:
-            return text
-        parts.append(full[max(pos, skip):])
-        return b"".join(parts)
-
 
 def apply_config(highlighter: Highlighter, config: object) -> bytes:
     """Sync ``highlighter`` with the terminal highlight settings.
@@ -434,4 +475,5 @@ def apply_config(highlighter: Highlighter, config: object) -> bytes:
     return highlighter.configure(
         get("terminal.highlight_enabled", False) is True,
         normalize_profile(get("terminal.highlight_profile", "generic")),
+        normalize_theme(get("terminal.highlight_theme", "securecrt")),
     )

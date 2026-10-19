@@ -5313,9 +5313,10 @@ class TerminalWidget(Gtk.Box):
     def _apply_highlight_settings(self) -> bool:
         held = apply_config(self._highlighter, self.config)
         logger.debug(
-            "Output highlighting enabled=%s profile=%s",
+            "Output highlighting enabled=%s profile=%s theme=%s",
             self._highlighter.enabled,
             self._highlighter.profile,
+            self._highlighter.theme,
         )
         if held:
             # Switched off mid-escape: show the bytes that were held back.
@@ -5323,7 +5324,10 @@ class TerminalWidget(Gtk.Box):
         return False
 
     def _on_config_setting_changed(self, _config, key, value):
-        if key in ('terminal.highlight_enabled', 'terminal.highlight_profile'):
+        if key in (
+            'terminal.highlight_enabled', 'terminal.highlight_profile',
+            'terminal.highlight_theme',
+        ):
             GLib.idle_add(self._apply_highlight_settings)
         elif key == 'terminal.pass_through_mode':
             GLib.idle_add(self._apply_pass_through_mode, bool(value))
