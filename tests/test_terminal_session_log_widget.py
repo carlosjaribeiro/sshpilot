@@ -164,3 +164,42 @@ def test_daemon_backend_uninstall_closes_the_handle(tmp_path):
     handle = widget._session_log._file
     TerminalWidget._uninstall_daemon_backend_io(widget)
     assert handle.closed and widget._session_log is None
+
+
+def test_same_minute_reconnect_through_the_widget_gets_a_suffixed_file(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    from sshpilot import terminal_session_log as tsl
+
+    tsl._used_paths.clear()
+    monkeypatch.setattr("sshpilot.terminal_session_log.datetime", _FakeDatetime)
+    _FakeDatetime.current = datetime(2026, 1, 1, 9, 0, 0)
+    config = _Config(session_log_enabled=True, session_log_folder=str(tmp_path))  # default pattern
+    widget = _widget(config)
+    widget._start_session_log()
+    TerminalWidget._on_daemon_output(widget, b"first\n")
+    widget._start_session_log()  # reconnect: new SessionLogger, same pattern, same minute
+    TerminalWidget._on_daemon_output(widget, b"second\n")
+    widget._stop_session_log()
+    files = sorted(p.name for p in (tmp_path / "2026-01-01").iterdir())
+    assert files == ["web (10.0.0.5) -2026-01-01- 09-00-2.log", "web (10.0.0.5) -2026-01-01- 09-00.log"]
+    assert (tmp_path / "2026-01-01" / files[1]).read_text() == "first\n"
+    assert (tmp_path / "2026-01-01" / files[0]).read_text() == "second\n"
+
+
+def test_widget_flushes_an_idle_prompt_with_the_glib_timeout(tmp_path, monkeypatch):
+    callbacks = []
+    fake_glib = types.SimpleNamespace(
+        timeout_add=lambda ms, cb: callbacks.append(cb) or len(callbacks),
+        source_remove=lambda _id: None,
+    )
+    monkeypatch.setattr(terminal_module, "GLib", fake_glib)
+    widget = _widget(_enabled(tmp_path))
+    widget._start_session_log()
+    TerminalWidget._on_daemon_output(widget, b"out\nuser@host:~$ ")
+    TerminalWidget._on_daemon_output(widget, b"l")
+    path = tmp_path / "web.log"
+    assert path.read_text() == "out\nuser@host:~$ "
+    assert callbacks[-1]() is False
+    assert path.read_text() == "out\nuser@host:~$ l"
+    widget._stop_session_log()

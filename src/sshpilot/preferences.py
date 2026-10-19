@@ -1026,6 +1026,7 @@ class PreferencesWindow(Adw.Window):
         group.add(self.session_log_pattern_row)
 
         self.session_log_preview_row = Adw.ActionRow(title=_("Preview"))
+        self.session_log_preview_row.set_use_markup(False)  # paths may contain '&'
         self.session_log_preview_row.set_subtitle_selectable(True)
         group.add(self.session_log_preview_row)
         self._update_session_log_preview()
@@ -1039,7 +1040,7 @@ class PreferencesWindow(Adw.Window):
         pattern = self.session_log_pattern_row.get_text().strip() or SESSION_LOG_DEFAULT_PATTERN
         preview = resolve_log_path(folder, pattern, "my-server", "10.0.0.5", datetime.now())
         if windows_path_on_posix(pattern) or windows_path_on_posix(folder):
-            preview += "\n" + _("Windows drive paths only work on Windows; here this is a relative path.")
+            preview += "\n" + _("Windows drive and network paths only work on Windows; here the file goes inside the log folder.")
         self.session_log_preview_row.set_subtitle(preview)
 
     def on_session_log_enabled_changed(self, row, _pspec):

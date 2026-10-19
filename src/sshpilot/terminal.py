@@ -1795,6 +1795,8 @@ class TerminalWidget(Gtk.Box):
                 self.config.get_setting,
                 lambda: os.path.join(get_data_dir(), 'logs'),
                 _on_error,
+                lambda ms, callback: GLib.timeout_add(ms, callback),
+                lambda source_id: GLib.source_remove(source_id),
             )
             if session_log is None:
                 return

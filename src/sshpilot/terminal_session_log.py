@@ -31,17 +31,22 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_PATTERN = "%Y-%M-%D/%S (%H) -%Y-%M-%D- %h-%m.log"
 
-_ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f\x7f]')
+# Also inert for any later ~/$/% expansion: a nickname must never become a path.
+_ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f\x7f$%{}]')
 _RESERVED = re.compile(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$", re.IGNORECASE)
 _WINDOWS_ABS = re.compile(r"^([A-Za-z]:[\\/]|\\\\)")
 # A ".." path component (Windows also drops trailing dots/spaces, so "../"
 # and ".. \\" mean the same thing).
+_DRIVE_RELATIVE = re.compile(r"^([A-Za-z]):(?![\\/])")
+_PLACEHOLDER = re.compile(r"(%.)")
 _DOTDOT = re.compile(r"(?<![^/\\])\.\.[ .]*(?![^/\\])")
 
 
 def sanitise_component(value: object, fallback: str = "terminal") -> str:
     """Make *value* safe as one path component on Windows and POSIX."""
     text = _ILLEGAL.sub("_", str(value or "")).rstrip(" .")
+    if text.startswith("~"):
+        text = "_" + text[1:]
     if not text:
         return fallback
     # "CON" and "CON.txt" are both reserved on Windows; the stem decides.
@@ -50,8 +55,22 @@ def sanitise_component(value: object, fallback: str = "terminal") -> str:
     return text
 
 
+def expand_env(text: str) -> str:
+    """Expand ``~`` and ``$VAR`` in a template (pattern or folder), never in
+    substituted session/host values. ``%X`` placeholders are left untouched."""
+    parts = _PLACEHOLDER.split(os.path.expanduser(text or ""))
+    # split() puts the captured placeholders at the odd indexes.
+    return "".join(
+        part if i % 2 else os.path.expandvars(part) for i, part in enumerate(parts)
+    )
+
+
 def expand_pattern(pattern: str, session: str, host: str, now: datetime) -> str:
-    """Expand the placeholders of *pattern* (``~`` and env vars as well)."""
+    """Expand ``~``/env vars in *pattern*, then its placeholders.
+
+    The order matters: values substituted last cannot be expanded again, so a
+    session named ``~`` or ``$HOME`` stays a plain file name.
+    """
     values = {
         "S": sanitise_component(session, "terminal"),
         "H": sanitise_component(host, "host"),
@@ -63,17 +82,19 @@ def expand_pattern(pattern: str, session: str, host: str, now: datetime) -> str:
         "s": f"{now.second:02d}",
         "%": "%",
     }
-    expanded = re.sub(r"%(.)", lambda m: values.get(m.group(1), m.group(0)), pattern)
+    expanded = re.sub(
+        r"%(.)", lambda m: values.get(m.group(1), m.group(0)), expand_env(pattern)
+    )
     # A relative pattern must not climb out of the log folder, so ".." is
-    # neutralised (also after ~ and env expansion, which can introduce it).
-    return _DOTDOT.sub("_", os.path.expandvars(os.path.expanduser(expanded)))
+    # neutralised.
+    return _DOTDOT.sub("_", expanded)
 
 
 def windows_path_on_posix(pattern: str, windows: Optional[bool] = None) -> bool:
     """True when *pattern* is a Windows drive/UNC path but this OS is POSIX."""
     if windows is None:
         windows = os.name == "nt"
-    return not windows and bool(_WINDOWS_ABS.match((pattern or "").strip()))
+    return not windows and bool(_WINDOWS_ABS.match(expand_env((pattern or "").strip())))
 
 
 def resolve_log_path(
@@ -86,18 +107,27 @@ def resolve_log_path(
 ) -> str:
     """Resolve folder + pattern to the file path for a session starting *now*.
 
-    An absolute pattern (POSIX ``/``, drive letter or UNC) ignores *folder*.
-    Both ``/`` and ``\\`` separate directories in the pattern, so a Windows
-    style pattern also works on POSIX. *windows* defaults to the host OS.
+    An absolute pattern (POSIX ``/`` on POSIX; drive letter or UNC on Windows)
+    ignores *folder*. Everything else stays inside it: on Windows a rooted
+    ``\\foo`` or drive-relative ``C:foo`` pattern is made relative, and on
+    POSIX a Windows drive/UNC pattern is placed inside the folder. Both ``/``
+    and ``\\`` separate directories, so a Windows style pattern also works on
+    POSIX. *windows* defaults to the host OS. Symlinks inside the folder are
+    followed (the folder is the user's own choice).
     """
     if windows is None:
         windows = os.name == "nt"
     expanded = expand_pattern(pattern or DEFAULT_PATTERN, session, host, now)
+    folder = expand_env(folder or "")
     if windows:
-        return str(PureWindowsPath(folder or "", expanded))
-    # shortcut: a Windows drive/UNC pattern on POSIX is kept as a relative
-    # path; it is only meaningful on Windows.
-    return str(PurePosixPath(folder or "", expanded.replace("\\", "/")))
+        if _DRIVE_RELATIVE.match(expanded):
+            expanded = _DRIVE_RELATIVE.sub(r"\1_", expanded)
+        elif expanded[:1] in ("/", "\\") and expanded[:2] not in ("\\\\", "//"):
+            expanded = expanded.lstrip("/\\")
+        return str(PureWindowsPath(folder, expanded))
+    if _WINDOWS_ABS.match(expanded):
+        expanded = re.sub(r"^([A-Za-z]):", r"\1_", expanded).lstrip("/\\")
+    return str(PurePosixPath(folder, expanded.replace("\\", "/")))
 
 
 class TerminalTextStripper:
@@ -111,10 +141,12 @@ class TerminalTextStripper:
     """
 
     _TEXT, _ESC, _CSI, _STRING, _STRING_ESC, _ESC_INT = range(6)
+    _CANCEL = "\x18\x1a"  # CAN, SUB abort a sequence in progress
 
     def __init__(self) -> None:
         self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self._state = self._TEXT
+        self._string_kind = ""
 
     def feed(self, data: bytes) -> str:
         out = []
@@ -122,8 +154,18 @@ class TerminalTextStripper:
             self._step(ch, out)
         return "".join(out)
 
+    def finish(self) -> str:
+        """Flush a UTF-8 sequence cut off at the end of the stream."""
+        return self._decoder.decode(b"", final=True) if self._state == self._TEXT else ""
+
     def _step(self, ch: str, out: list) -> None:
         state = self._state
+        if state != self._TEXT and ch in self._CANCEL:
+            self._state = self._TEXT
+            return
+        if state in (self._CSI, self._ESC_INT) and ch == "\x1b":
+            self._state = self._ESC  # a new escape restarts parsing
+            return
         if state == self._TEXT:
             if ch == "\x1b":
                 self._state = self._ESC
@@ -131,10 +173,13 @@ class TerminalTextStripper:
                 out.append(ch)
             # CR (so CRLF becomes LF) and other C0 controls are dropped
         elif state == self._ESC:
-            if ch == "[":
+            if ch == "\x1b":
+                pass  # ESC ESC [31m: still one escape in progress
+            elif ch == "[":
                 self._state = self._CSI
             elif ch in "]PX^_":
                 self._state = self._STRING
+                self._string_kind = ch
             elif " " <= ch <= "/":
                 self._state = self._ESC_INT
             else:
@@ -146,7 +191,7 @@ class TerminalTextStripper:
             if "0" <= ch <= "~":
                 self._state = self._TEXT
         elif state == self._STRING:
-            if ch == "\x07":
+            if ch == "\x07" and self._string_kind == "]":  # BEL ends OSC only
                 self._state = self._TEXT
             elif ch == "\x1b":
                 self._state = self._STRING_ESC
@@ -160,20 +205,22 @@ class TerminalTextStripper:
 
 
 _FLUSH_INTERVAL = 1.0  # seconds
-_open_paths: set = set()  # files held open by a SessionLogger in this process
+_IDLE_FLUSH_MS = 500
+# Files used by any session in this run. A later session that resolves to one
+# of them (same-minute reconnect, a second tab with the same pattern, or a
+# pattern with no time in it) gets a "-2" suffix instead of sharing the file.
+# A file left by an earlier run is still appended to.
+_used_paths: set = set()
 
 
 def _path_key(path: str) -> str:
     return os.path.normcase(os.path.abspath(path))
 
 
-def _free_path(path: str, used: set) -> str:
-    """Add a "-2", "-3"... suffix when *path* is held by a live session or was
-    already used by this logger (a reconnect within the same minute/second).
-    A file left by an earlier run is still appended to."""
+def _free_path(path: str) -> str:
     root, ext = os.path.splitext(path)
     candidate, n = path, 2
-    while _path_key(candidate) in _open_paths or candidate in used:
+    while _path_key(candidate) in _used_paths:
         candidate = f"{root}-{n}{ext}"
         n += 1
     return candidate
@@ -183,16 +230,16 @@ class SessionLogger:
     """Append the plain-text transcript of one terminal session to a file.
 
     ``start`` can be called again (reconnect): it closes the old file and
-    opens a new one named for the new start time; if that name equals the
-    previous one (same-second reconnect) or another live session's file, a
-    ``-2`` style suffix keeps sessions apart. A file error never raises into
-    the terminal; it is reported once through ``on_error`` and logging stays
-    off until the next ``start``.
+    opens a new one named for the new start time, with a ``-2`` style suffix
+    when that name was already used in this run. A file error never raises
+    into the terminal; it is reported once through ``on_error`` and logging
+    stays off until the next ``start``.
 
-    Output is buffered and flushed when a chunk ends a line or a second has
-    passed, and always on ``close``. shortcut: a hard crash can lose up to
-    one second of an unfinished line; upgrade to an idle-timer flush if that
-    matters.
+    Output is buffered: a chunk containing a finished line is flushed at
+    once, an unfinished tail (a prompt) after ``_IDLE_FLUSH_MS`` through the
+    optional ``timer_add(ms, callback)`` / ``timer_remove(id)`` pair (GLib's
+    timeout functions in the app; the callback returns False), or on the next
+    write after ``_FLUSH_INTERVAL``; and always on ``close``.
     """
 
     def __init__(
@@ -200,15 +247,18 @@ class SessionLogger:
         folder: str,
         pattern: str = DEFAULT_PATTERN,
         on_error: Optional[Callable[[OSError], None]] = None,
+        timer_add: Optional[Callable[[int, Callable[[], bool]], object]] = None,
+        timer_remove: Optional[Callable[[object], None]] = None,
     ) -> None:
         self.folder = folder
         self.pattern = pattern
         self._on_error = on_error
+        self._timer_add = timer_add
+        self._timer_remove = timer_remove
+        self._timer = None
         self._file = None
         self._stripper = TerminalTextStripper()
         self._last_flush = 0.0
-        self._key: Optional[str] = None
-        self._used: set = set()
         self.path: Optional[str] = None
 
     def start(self, session: str, host: str, now: Optional[datetime] = None) -> Optional[str]:
@@ -216,8 +266,7 @@ class SessionLogger:
         self._stripper = TerminalTextStripper()
         self.path = None
         path = _free_path(
-            resolve_log_path(self.folder, self.pattern, session, host, now or datetime.now()),
-            self._used,
+            resolve_log_path(self.folder, self.pattern, session, host, now or datetime.now())
         )
         try:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -227,9 +276,7 @@ class SessionLogger:
             self._fail(exc)
             return None
         self.path = path
-        self._used.add(path)
-        self._key = _path_key(path)
-        _open_paths.add(self._key)
+        _used_paths.add(_path_key(path))
         self._last_flush = time.monotonic()
         return path
 
@@ -241,17 +288,41 @@ class SessionLogger:
             return
         try:
             self._file.write(text)
-            if text.endswith("\n") or time.monotonic() - self._last_flush >= _FLUSH_INTERVAL:
-                self._file.flush()
-                self._last_flush = time.monotonic()
+            if "\n" in text or time.monotonic() - self._last_flush >= _FLUSH_INTERVAL:
+                self.flush()
+            elif self._timer is None and self._timer_add is not None:
+                self._timer = self._timer_add(_IDLE_FLUSH_MS, self._on_idle)
         except OSError as exc:
             self._fail(exc)
 
+    def flush(self) -> None:
+        self._cancel_timer()
+        if self._file is not None:
+            self._file.flush()
+            self._last_flush = time.monotonic()
+
+    def _on_idle(self) -> bool:
+        self._timer = None
+        try:
+            self.flush()
+        except OSError as exc:
+            self._fail(exc)
+        return False  # one-shot GLib timeout
+
+    def _cancel_timer(self) -> None:
+        timer, self._timer = self._timer, None
+        if timer is not None and self._timer_remove is not None:
+            try:
+                self._timer_remove(timer)
+            except Exception:
+                logger.debug("Session log timer removal failed", exc_info=True)
+
     def close(self) -> None:
+        self._cancel_timer()
         handle, self._file = self._file, None
-        _open_paths.discard(self._key)
         if handle is not None:
             try:
+                handle.write(self._stripper.finish())
                 handle.close()
             except OSError:
                 logger.debug("Session log close failed", exc_info=True)
@@ -271,6 +342,8 @@ def build_session_logger(
     get_setting: Callable[[str, object], object],
     default_folder: Callable[[], str],
     on_error: Optional[Callable[[OSError], None]] = None,
+    timer_add: Optional[Callable[[int, Callable[[], bool]], object]] = None,
+    timer_remove: Optional[Callable[[object], None]] = None,
 ) -> Optional[SessionLogger]:
     """Return a logger for the current settings, or None when disabled."""
     if get_setting("terminal.session_log_enabled", False) is not True:
@@ -279,4 +352,4 @@ def build_session_logger(
     pattern = get_setting("terminal.session_log_pattern", "")
     folder = folder if isinstance(folder, str) and folder.strip() else default_folder()
     pattern = pattern if isinstance(pattern, str) and pattern.strip() else DEFAULT_PATTERN
-    return SessionLogger(folder, pattern, on_error)
+    return SessionLogger(folder, pattern, on_error, timer_add, timer_remove)

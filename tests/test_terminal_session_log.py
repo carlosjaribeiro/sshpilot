@@ -115,13 +115,14 @@ def test_logger_writes_plain_text_in_subfolder(tmp_path):
     assert Path(path).read_text(encoding="utf-8") == "hello\n"
 
 
-def test_logger_appends_to_existing_file(tmp_path):
+def test_second_session_in_a_run_with_a_static_pattern_gets_its_own_file(tmp_path):
     for text in (b"one\n", b"two\n"):
         log = SessionLogger(str(tmp_path), "s.log")
         log.start("s", "h", NOW)
         log.write(text)
         log.close()
-    assert (tmp_path / "s.log").read_text() == "one\ntwo\n"
+    assert (tmp_path / "s.log").read_text() == "one\n"
+    assert (tmp_path / "s-2.log").read_text() == "two\n"
 
 
 def test_reconnect_starts_a_new_file_with_new_start_time(tmp_path):
@@ -181,7 +182,7 @@ def test_build_session_logger_toggle_and_fallbacks():
             "terminal.session_log_folder": "/mine",
             "terminal.session_log_pattern": "%S.log",
         }),
-        "/d",
+        lambda: "/d",
     )
     assert (log.folder, log.pattern) == ("/mine", "%S.log")
 
@@ -275,7 +276,9 @@ def test_reopening_after_close_still_appends_to_an_older_file(tmp_path):
     (tmp_path / "s.log").write_text("old\n")
     log = SessionLogger(str(tmp_path), "s.log")
     assert log.start("s", "h", NOW) == str(tmp_path / "s.log")
+    log.write(b"new\n")
     log.close()
+    assert (tmp_path / "s.log").read_text() == "old\nnew\n"
 
 
 def test_output_is_buffered_until_a_line_ends_and_flushed_on_close(tmp_path, monkeypatch):
@@ -302,3 +305,97 @@ def test_windows_drive_pattern_on_posix_is_flagged():
     assert windows_path_on_posix("\\\\nas\\share\\x.log", windows=False)
     assert not windows_path_on_posix(USER_PATTERN, windows=True)
     assert not windows_path_on_posix("/var/log/%S.log", windows=False)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_run_registry():
+    tsl._used_paths.clear()
+
+
+@pytest.mark.parametrize("nickname", ["~", "~/x", "$HOME", "${HOME}", "%S", "%%", "..", "~root"])
+def test_nickname_and_host_values_are_inert(nickname, monkeypatch):
+    monkeypatch.setenv("HOME", "/home/u")
+    for windows in (False, True):
+        path = resolve_log_path("/logs", "%S/%H.log", nickname, nickname, NOW, windows=windows)
+        norm = (ntpath if windows else posixpath).normpath(path)
+        root = "/logs" if not windows else ntpath.normpath("/logs")
+        assert (ntpath if windows else posixpath).commonpath([norm, root]) == root, path
+        assert "/home/u" not in path.replace("\\", "/")
+
+
+def test_tilde_and_env_in_the_template_still_expand(monkeypatch):
+    monkeypatch.setenv("HOME", "/home/u")
+    monkeypatch.setenv("SUB", "work")
+    assert resolve_log_path("~/logs", "$SUB/%S.log", "s", "h", NOW, windows=False) == "/home/u/logs/work/s.log"
+
+
+def test_sanitise_values_have_no_expansion_characters():
+    for ch in "$%{}":
+        assert ch not in sanitise_component(f"a{ch}b")
+    assert not sanitise_component("~user").startswith("~")
+
+
+def test_unc_and_drive_patterns_stay_inside_folder_on_posix():
+    for pattern in ("\\\\nas\\share\\%S.log", "C:\\x\\%S.log", "C:/x/%S.log"):
+        path = resolve_log_path("/logs", pattern, "s", "h", NOW, windows=False)
+        assert posixpath.commonpath([posixpath.normpath(path), "/logs"]) == "/logs", path
+
+
+def test_rooted_and_drive_relative_patterns_stay_inside_folder_on_windows():
+    for pattern in ("\\foo\\%S.log", "/foo/%S.log", "D:foo\\%S.log"):
+        path = resolve_log_path("C:\\logs", pattern, "s", "h", NOW, windows=True)
+        assert ntpath.commonpath([ntpath.normpath(path), "C:\\logs"]) == "C:\\logs", path
+    # a real UNC or drive-absolute pattern still wins over the folder
+    assert resolve_log_path("C:\\logs", "\\\\nas\\s\\x.log", "s", "h", NOW, windows=True) == "\\\\nas\\s\\x.log"
+    assert resolve_log_path("C:\\logs", "D:\\x.log", "s", "h", NOW, windows=True) == "D:\\x.log"
+
+
+def test_idle_timer_flushes_an_unfinished_prompt(tmp_path):
+    timers = {}
+    log = SessionLogger(
+        str(tmp_path), "s.log",
+        timer_add=lambda ms, cb: timers.setdefault("cb", cb) and "id1",
+        timer_remove=lambda tid: timers.update(removed=tid),
+    )
+    path = Path(log.start("s", "h", NOW))
+    log.write(b"out\nuser@host:~$ ")  # a finished line flushes everything written
+    assert path.read_text() == "out\nuser@host:~$ "
+    log.write(b"ls")
+    assert path.read_text() == "out\nuser@host:~$ "  # tail waits for the timer
+    assert timers["cb"]() is False  # one-shot GLib timeout
+    assert path.read_text() == "out\nuser@host:~$ ls"
+
+
+def test_close_cancels_the_pending_idle_timer(tmp_path):
+    removed = []
+    log = SessionLogger(str(tmp_path), "s.log", timer_add=lambda ms, cb: "t", timer_remove=removed.append)
+    log.start("s", "h", NOW)
+    log.write(b"abc")
+    log.close()
+    assert removed == ["t"]
+    assert (tmp_path / "s.log").read_text() == "abc"
+
+
+def test_stripper_repeated_esc_and_restart_inside_sequences():
+    assert strip(b"a\x1b\x1b[31mb") == "ab"
+    assert strip(b"a\x1b[3\x1b[31mb") == "ab"
+    assert strip(b"a\x1b(\x1b[0mb") == "ab"
+
+
+def test_stripper_can_and_sub_abort_a_sequence():
+    assert strip(b"a\x1b[3\x18b") == "ab"
+    assert strip(b"a\x1b]0;ti\x1ab") == "ab"
+
+
+def test_bel_ends_osc_but_not_dcs_apc_pm_sos():
+    assert strip(b"a\x1b]0;t\x07b") == "ab"
+    for intro in (b"P", b"_", b"^", b"X"):
+        assert strip(b"a\x1b" + intro + b"hidden\x07still\x1b\\b") == "ab"
+
+
+def test_truncated_utf8_at_close_is_written_not_lost(tmp_path):
+    log = SessionLogger(str(tmp_path), "s.log")
+    path = Path(log.start("s", "h", NOW))
+    log.write("é".encode()[:1])
+    log.close()
+    assert path.read_text(encoding="utf-8") == "\ufffd"
