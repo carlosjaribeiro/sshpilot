@@ -13,6 +13,7 @@ from sshpilot.terminal_session_log import (
     expand_pattern,
     resolve_log_path,
     sanitise_component,
+    windows_path_on_posix,
 )
 
 NOW = datetime(2026, 3, 9, 14, 7, 5)
@@ -195,3 +196,109 @@ def test_module_is_gi_free():
         for alias in (node.names if isinstance(node, ast.Import) else [None])
     }
     assert not imported & {"gi", "Gtk", "Adw", "Gio", "GLib", "Vte"}
+
+
+import ntpath  # noqa: E402
+import posixpath  # noqa: E402
+
+import pytest  # noqa: E402
+
+from sshpilot import terminal_session_log as tsl  # noqa: E402
+
+TRAVERSAL = [
+    "../../outside.log",
+    "..\\..\\outside.log",
+    "a/../../outside.log",
+    "a\\../..\\outside.log",
+    "./../outside.log",
+    ".. /outside.log",
+    "...\\outside.log",
+    "%S/../../outside.log",
+]
+
+
+@pytest.mark.parametrize("pattern", TRAVERSAL)
+def test_relative_pattern_cannot_escape_folder_posix(pattern):
+    path = posixpath.normpath(resolve_log_path("/logs", pattern, "s", "h", NOW, windows=False))
+    assert posixpath.commonpath([path, "/logs"]) == "/logs"
+
+
+@pytest.mark.parametrize("pattern", TRAVERSAL)
+def test_relative_pattern_cannot_escape_folder_windows(pattern):
+    path = ntpath.normpath(resolve_log_path("C:\\logs", pattern, "s", "h", NOW, windows=True))
+    assert ntpath.commonpath([path, "C:\\logs"]) == "C:\\logs"
+
+
+def test_dotdot_cannot_escape_through_real_files(tmp_path):
+    folder = tmp_path / "a" / "b" / "logs"
+    log = SessionLogger(str(folder), "../../outside.log")
+    path = log.start("s", "h", NOW)
+    log.write(b"x\n")
+    log.close()
+    assert Path(path).resolve().is_relative_to(folder.resolve())
+    assert not (tmp_path / "a" / "outside.log").exists()
+
+
+def test_dotdot_neutralised_in_env_expansion(monkeypatch):
+    monkeypatch.setenv("UP", "..")
+    path = resolve_log_path("/logs", "$UP/$UP/x.log", "s", "h", NOW, windows=False)
+    assert posixpath.commonpath([posixpath.normpath(path), "/logs"]) == "/logs"
+
+
+def test_names_that_merely_contain_dots_are_kept():
+    assert expand_pattern("..hidden/a..b/c.log", "s", "h", NOW) == "..hidden/a..b/c.log"
+
+
+def test_same_second_reconnect_gets_a_suffix_instead_of_appending(tmp_path):
+    log = SessionLogger(str(tmp_path), "%S %h-%m.log")
+    first = log.start("s", "h", NOW)
+    log.write(b"one\n")
+    second = log.start("s", "h", NOW)
+    log.write(b"two\n")
+    third = log.start("s", "h", NOW)
+    log.close()
+    assert [Path(p).name for p in (first, second, third)] == [
+        "s 14-07.log", "s 14-07-2.log", "s 14-07-3.log",
+    ]
+    assert Path(first).read_text() == "one\n"
+    assert Path(second).read_text() == "two\n"
+
+
+def test_two_live_sessions_with_one_pattern_never_share_a_file(tmp_path):
+    a, b = SessionLogger(str(tmp_path), "s.log"), SessionLogger(str(tmp_path), "s.log")
+    assert a.start("s", "h", NOW) != b.start("s", "h", NOW)
+    a.close()
+    b.close()
+
+
+def test_reopening_after_close_still_appends_to_an_older_file(tmp_path):
+    (tmp_path / "s.log").write_text("old\n")
+    log = SessionLogger(str(tmp_path), "s.log")
+    assert log.start("s", "h", NOW) == str(tmp_path / "s.log")
+    log.close()
+
+
+def test_output_is_buffered_until_a_line_ends_and_flushed_on_close(tmp_path, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(tsl.time, "monotonic", lambda: clock[0])
+    log = SessionLogger(str(tmp_path), "s.log")
+    path = Path(log.start("s", "h", NOW))
+    log.write(b"partial")
+    assert path.read_text() == ""  # not flushed per chunk
+    log.write(b" line\n")
+    assert path.read_text() == "partial line\n"  # a finished line is flushed
+    log.write(b"tail")
+    assert path.read_text() == "partial line\n"
+    clock[0] += 2
+    log.write(b"!")
+    assert path.read_text() == "partial line\ntail!"  # interval flush
+    log.write(b" more")
+    log.close()
+    assert path.read_text() == "partial line\ntail! more"  # close flushes
+
+
+def test_windows_drive_pattern_on_posix_is_flagged():
+    assert windows_path_on_posix(USER_PATTERN, windows=False)
+    assert windows_path_on_posix("\\\\nas\\share\\x.log", windows=False)
+    assert not windows_path_on_posix(USER_PATTERN, windows=True)
+    assert not windows_path_on_posix("/var/log/%S.log", windows=False)

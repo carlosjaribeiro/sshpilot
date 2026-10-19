@@ -94,3 +94,73 @@ def test_session_log_hook_sits_before_painting():
 
     source = inspect.getsource(terminal_module.TerminalWidget._on_daemon_output)
     assert source.index("session_log.write") < source.index("self._feed_display")
+
+
+class _FakeDatetime:
+    current = None
+
+    @classmethod
+    def now(cls):
+        return cls.current
+
+
+def _bind_teardown(widget):
+    widget._uninstall_selection_feed_pause = lambda: None
+    widget.backend = None
+    widget._mouse_tracking = None
+    widget._daemon_mode = False
+    widget._daemon_controller = None
+    widget.is_connected = False
+    widget.get_root = lambda: None
+    widget.session_id = "t1"
+    widget.emit = lambda *args: None
+    widget._is_quitting = True
+    return widget
+
+
+def test_reconnect_opens_a_new_session_file_with_the_new_start_time(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    monkeypatch.setattr("sshpilot.terminal_session_log.datetime", _FakeDatetime)
+    config = _enabled(tmp_path)
+    config.values["terminal.session_log_pattern"] = "%S %h-%m-%s.log"
+    widget = _widget(config)
+    _FakeDatetime.current = datetime(2026, 1, 1, 9, 0, 0)
+    widget._start_session_log()
+    TerminalWidget._on_daemon_output(widget, b"first\n")
+    _FakeDatetime.current = datetime(2026, 1, 1, 9, 30, 15)
+    widget._start_session_log()  # what start_daemon_session does on reconnect
+    TerminalWidget._on_daemon_output(widget, b"second\n")
+    widget._stop_session_log()
+    assert (tmp_path / "web 09-00-00.log").read_text() == "first\n"
+    assert (tmp_path / "web 09-30-15.log").read_text() == "second\n"
+
+
+def test_reattach_replay_then_live_output_is_logged_once(tmp_path):
+    widget = _widget(_enabled(tmp_path))
+    widget._start_session_log()
+    TerminalWidget._on_daemon_output(widget, b"live1\n")
+    widget._daemon_controller.delivering_replay = True  # reattach replays history
+    TerminalWidget._on_daemon_output(widget, b"live1\n")
+    widget._daemon_controller.delivering_replay = False
+    TerminalWidget._on_daemon_output(widget, b"live2\n")
+    widget._stop_session_log()
+    assert (tmp_path / "web.log").read_text() == "live1\nlive2\n"
+
+
+def test_disconnect_flushes_and_closes_the_handle(tmp_path):
+    widget = _bind_teardown(_widget(_enabled(tmp_path)))
+    widget._start_session_log()
+    handle = widget._session_log._file
+    TerminalWidget._on_daemon_output(widget, b"unfinished")  # buffered, no newline
+    TerminalWidget.disconnect(widget)
+    assert handle.closed and widget._session_log is None
+    assert (tmp_path / "web.log").read_text() == "unfinished"
+
+
+def test_daemon_backend_uninstall_closes_the_handle(tmp_path):
+    widget = _bind_teardown(_widget(_enabled(tmp_path)))
+    widget._start_session_log()
+    handle = widget._session_log._file
+    TerminalWidget._uninstall_daemon_backend_io(widget)
+    assert handle.closed and widget._session_log is None

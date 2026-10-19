@@ -21,7 +21,11 @@ from .gtk.secret_status_messages import format_secret_error, format_secret_messa
 from .shortcut_editor import ShortcutsPreferencesPage
 from .shortcut_utils import install_esc_to_close
 from .monospace_font_dialog import MonospaceFontDialog
-from .terminal_session_log import DEFAULT_PATTERN as SESSION_LOG_DEFAULT_PATTERN, resolve_log_path
+from .terminal_session_log import (
+    DEFAULT_PATTERN as SESSION_LOG_DEFAULT_PATTERN,
+    resolve_log_path,
+    windows_path_on_posix,
+)
 from .terminal_theme_selector import TERMINAL_SCHEME_KEYS, TerminalThemeChooser
 from .terminal_osc52 import (
     OSC52_MAX_MAX_KIB,
@@ -1033,9 +1037,10 @@ class PreferencesWindow(Adw.Window):
 
         folder = self.session_log_folder_row.get_text().strip() or os.path.join(get_data_dir(), 'logs')
         pattern = self.session_log_pattern_row.get_text().strip() or SESSION_LOG_DEFAULT_PATTERN
-        self.session_log_preview_row.set_subtitle(
-            resolve_log_path(folder, pattern, "my-server", "10.0.0.5", datetime.now())
-        )
+        preview = resolve_log_path(folder, pattern, "my-server", "10.0.0.5", datetime.now())
+        if windows_path_on_posix(pattern) or windows_path_on_posix(folder):
+            preview += "\n" + _("Windows drive paths only work on Windows; here this is a relative path.")
+        self.session_log_preview_row.set_subtitle(preview)
 
     def on_session_log_enabled_changed(self, row, _pspec):
         try:
