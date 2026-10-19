@@ -7,48 +7,46 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any
 
 _RECORD_KEY = re.compile(r'^[SD]:"((?:[^"\\]|\\.)*)"=')
 _CREDENTIAL = re.compile(r"password|credential|passphrase|secret", re.IGNORECASE)
-_VARIABLE = re.compile(r"\$\{([^}]+)\}")
 
 
-def _read_ini(path: Path) -> tuple[dict[tuple[str, str], str], list[str]]:
+def _read_ini(path: Path) -> dict[tuple[str, str], str]:
     raw = path.read_bytes()
-    for encoding in ("utf-8-sig", "utf-8", "latin-1"):
-        try:
-            text = raw.decode(encoding)
-            break
-        except UnicodeDecodeError:
-            continue
+    encoding = "utf-16" if raw.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig"
+    try:
+        text = raw.decode(encoding)
+    except UnicodeDecodeError:
+        text = raw.decode("latin-1")
     records: dict[tuple[str, str], str] = {}
-    warnings: list[str] = []
     for line in text.splitlines():
-        line = line.strip()
         match = _RECORD_KEY.match(line)
         if not match:
             continue
         key = match.group(1).replace(r'\"', '"')
         if _CREDENTIAL.search(key):
             continue
-        record_type = line[0]
-        value = line[match.end():].strip()
-        record_key = (record_type, key)
-        previous = records.get(record_key)
-        if previous is not None and previous != value:
-            warnings.append(f"{path.stem}: duplicate {record_type}:{key}; using last value")
-        other_type = "D" if record_type == "S" else "S"
-        other_value = records.get((other_type, key))
-        if other_value is not None and other_value != value:
-            warnings.append(f"{path.stem}: both S:{key} and D:{key} are present")
-        records[record_key] = value
-    return records, warnings
+        # Keep SecureCRT's record type so string ports remain decimal and DWORDs hexadecimal.
+        records[(line[0], key)] = line[match.end():]
+    return records
+
+
+def _raw_value(records: dict[tuple[str, str], str], key: str, default: str = "") -> str:
+    return records.get(("S", key), records.get(("D", key), default))
 
 
 def _value(records: dict[tuple[str, str], str], key: str, default: str = "") -> str:
-    return records.get(("S", key), records.get(("D", key), default)).strip()
+    return _raw_value(records, key, default).strip()
+
+
+def _bad_target(value: str) -> bool:
+    return value.startswith("-") or any(
+        char.isspace() or unicodedata.category(char) == "Cc" for char in value
+    )
 
 
 def _port(
@@ -60,6 +58,7 @@ def _port(
     value = dword if dword is not None else string
     if value is None:
         return default
+    value = value.strip()
     try:
         if dword is not None:
             if not re.fullmatch(r"[0-9a-fA-F]{1,8}", value):
@@ -78,19 +77,6 @@ def _port(
         return default
 
 
-def _key_path(value: str, warnings: list[str], session: str) -> str:
-    def replace(match: re.Match[str]) -> str:
-        name = match.group(1)
-        resolved = os.environ.get(name) if name.startswith("VDS_") else None
-        if resolved is None:
-            warnings.append(f"{session}: cannot resolve ${{{name}}} in identity path")
-            return match.group(0)
-        return resolved
-
-    value = _VARIABLE.sub(replace, value)
-    return os.path.expanduser(value)
-
-
 def _protocol_port(
     protocol: str, records: dict[tuple[str, str], str],
     warnings: list[str], session: str,
@@ -107,20 +93,24 @@ def _protocol_port(
     return None
 
 
-def _session_summary(name: str, protocol: str, host: str, port: int | None) -> str:
-    target = host or "(no host)"
-    if port is not None:
-        target += f":{port}"
-    return f"{name}: {protocol or 'unknown'} {target}"
+def _key_path(value: str, warnings: list[str], session: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name in {"VDS_USER_DATA_PATH", "VDS_CONFIG_PATH"} and name in os.environ:
+            return os.environ[name]
+        warnings.append(f"{session}: cannot resolve ${{{name}}} in identity path")
+        return match.group(0)
+
+    value = re.sub(r"\$\{([^}]+)\}", replace, value)
+    value = os.path.expanduser(value)
+    if re.match(r"^[A-Za-z]:[\\/]", value):
+        warnings.append(f"{session}: Windows identity path passed through unchanged")
+    return value
 
 
-def _firewall_target(value: str) -> str:
-    target = re.sub(r"^Session:", "", value.strip(), flags=re.IGNORECASE)
-    return target.replace("\\", "/").strip("/")
-
-
-def _session_path_key(value: str) -> str:
-    normalized = value.replace("\\", "/").strip("/")
+def _session_key(value: str) -> str:
+    normalized = re.sub(r"^Session:", "", value.strip(), flags=re.IGNORECASE)
+    normalized = normalized.replace("\\", "/").strip("/")
     if normalized.casefold().endswith(".ini"):
         normalized = normalized[:-4]
     return Path(normalized).as_posix().casefold()
@@ -128,18 +118,23 @@ def _session_path_key(value: str) -> str:
 
 def _resolve_firewall(
     value: str,
-    ssh_paths: dict[str, dict[tuple[str, str], str]],
-    ssh_stems: dict[str, list[dict[tuple[str, str], str]]],
-) -> tuple[dict[tuple[str, str], str] | None, str]:
-    target = _firewall_target(value)
-    path_key = _session_path_key(target)
-    if path_key in ssh_paths:
-        return ssh_paths[path_key], ""
-    basename = path_key.rsplit("/", 1)[-1]
-    matches = ssh_stems.get(basename, [])
+    known_ssh: dict[str, list[tuple[str, dict[tuple[str, str], str], int]]],
+) -> tuple[tuple[str, dict[tuple[str, str], str], int] | None, str]:
+    if not value.casefold().startswith("session:"):
+        return None, "does not start with Session:"
+    path_key = _session_key(value)
+    by_path = known_ssh.get(f"path:{path_key}", [])
+    if len(by_path) == 1:
+        return by_path[0], ""
+    if len(by_path) > 1:
+        return None, "is ambiguous"
+    target = value[len("Session:"):].replace("\\", "/").strip("/")
+    if "/" in target:
+        return None, "is unknown"
+    matches = known_ssh.get(f"stem:{path_key.rsplit('/', 1)[-1]}", [])
     if len(matches) == 1:
         return matches[0], ""
-    return None, "ambiguous" if len(matches) > 1 else "unknown"
+    return None, "is ambiguous" if matches else "is unknown"
 
 
 def _add_groups(root: Path, file: Path, data: dict[str, Any]) -> str | None:
@@ -159,53 +154,72 @@ def convert_sessions(root: Path) -> tuple[dict[str, Any], list[str], list[str]]:
     warnings: list[str] = []
     unsupported: list[str] = []
     sessions: list[tuple[Path, dict[tuple[str, str], str]]] = []
-    ini_files = (
-        path for path in root.rglob("*")
-        if not path.is_symlink() and path.is_file() and path.suffix.casefold() == ".ini"
-    )
-    for file in sorted(ini_files):
-        if file.name.casefold() in {"default.ini", "__folderdata__.ini"}:
+    for file in sorted(root.rglob("*")):
+        if file.suffix.casefold() != ".ini":
+            continue
+        if file.is_symlink():
+            warnings.append(f"{file}: symlinked session skipped")
+            continue
+        if not file.is_file() or file.name.casefold() in {"default.ini", "__folderdata__.ini"}:
             continue
         try:
-            records, record_warnings = _read_ini(file)
+            sessions.append((file, _read_ini(file)))
         except OSError as exc:
             warnings.append(f"{file}: cannot read session ({exc})")
-            continue
-        warnings.extend(record_warnings)
-        sessions.append((file, records))
 
-    ssh_paths: dict[str, dict[tuple[str, str], str]] = {}
-    ssh_stems: dict[str, list[dict[tuple[str, str], str]]] = {}
+    known_ssh: dict[str, list[tuple[str, dict[tuple[str, str], str], int]]] = {}
+    prepared: dict[str, tuple[str, str, int] | None] = {}
     for file, records in sessions:
-        if _value(records, "Protocol Name", "SSH2").casefold() not in {"ssh", "ssh2"}:
+        relative = file.relative_to(root).as_posix()
+        path_key = _session_key(relative)
+        protocol = _value(records, "Protocol Name", "SSH2")
+        if protocol.casefold() not in {"ssh", "ssh2"}:
             continue
-        if not _value(records, "Hostname"):
+        hostname = _raw_value(records, "Hostname")
+        username = _raw_value(records, "Username")
+        if not hostname.strip():
+            warnings.append(f"{file.stem}: missing Hostname; skipped")
+            prepared[path_key] = None
             continue
-        relative = _session_path_key(file.relative_to(root).as_posix())
-        ssh_paths[relative] = records
-        ssh_stems.setdefault(file.stem.casefold(), []).append(records)
+        if _bad_target(hostname):
+            warnings.append(f"{file.stem}: invalid Hostname; skipped")
+            prepared[path_key] = None
+            continue
+        if username and _bad_target(username):
+            warnings.append(f"{file.stem}: invalid Username; skipped")
+            prepared[path_key] = None
+            continue
+        port = _protocol_port(protocol, records, warnings, file.stem)
+        prepared[path_key] = (hostname.strip(), username.strip(), port)
+        session = (path_key, records, port)
+        known_ssh.setdefault(f"path:{path_key}", []).append(session)
+        known_ssh.setdefault(f"stem:{file.stem.casefold()}", []).append(session)
 
     data: dict[str, Any] = {}
     for file, records in sessions:
         display = file.stem
         protocol = _value(records, "Protocol Name", "SSH2")
         host = _value(records, "Hostname")
+        relative_key = _session_key(file.relative_to(root).as_posix())
         if protocol.casefold() not in {"ssh", "ssh2"}:
             port = _protocol_port(protocol, records, warnings, display)
-            unsupported.append(_session_summary(display, protocol, host, port))
+            destination = host or "(no host)"
+            if port is not None:
+                destination += f":{port}"
+            unsupported.append(f"{display}: {protocol or 'unknown'} {destination}")
             continue
-        if not host:
-            warnings.append(f"{display}: missing Hostname; skipped")
+        connection = prepared.get(relative_key)
+        if connection is None:
             continue
-
+        host, username, port = connection
         parent = _add_groups(root, file, data)
         entry: dict[str, Any] = {
             "_is_group": 0,
             "name": display,
             "method": "SSH",
             "ip": host,
-            "user": _value(records, "Username"),
-            "port": _protocol_port(protocol, records, warnings, display),
+            "user": username,
+            "port": port,
             "parent": parent,
         }
         identity = _value(records, "Identity Filename V2") or _value(records, "Identity Filename")
@@ -214,15 +228,17 @@ def convert_sessions(root: Path) -> tuple[dict[str, Any], list[str], list[str]]:
 
         firewall = _value(records, "Firewall Name")
         if firewall and firewall.casefold() != "none":
-            jump, reason = _resolve_firewall(firewall, ssh_paths, ssh_stems)
+            jump, reason = _resolve_firewall(firewall, known_ssh)
             if jump is None:
-                warnings.append(f"{display}: firewall session {firewall!r} is {reason}")
+                warnings.append(f"{display}: firewall session {firewall!r} {reason}")
+            elif jump[0] == relative_key:
+                warnings.append(f"{display}: firewall session refers to itself; ignored")
             else:
-                entry["jump ip"] = _value(jump, "Hostname")
-                jump_user = _value(jump, "Username")
+                _, jump_records, jump_port = jump
+                entry["jump ip"] = _value(jump_records, "Hostname")
+                jump_user = _value(jump_records, "Username")
                 if jump_user:
                     entry["jump user"] = jump_user
-                jump_port = _protocol_port("SSH2", jump, warnings, display)
                 if jump_port != 22:
                     entry["jump port"] = jump_port
 
@@ -248,8 +264,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with args.output.open("x", encoding="utf-8") as output:
             output.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
-    except FileExistsError:
-        parser.error(f"output file already exists: {args.output}")
+    except OSError as exc:
+        parser.error(f"cannot write output file {args.output}: {exc}")
     print(f"Wrote {len(data)} Asbru entries to {args.output}")
     for warning in warnings:
         print(f"Warning: {warning}", file=sys.stderr)

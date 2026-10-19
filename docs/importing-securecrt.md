@@ -38,19 +38,28 @@ Keep the output path separate from the SecureCRT Sessions directory.
 | `Protocol Name` set to SSH/SSH2 | Imported as SSH |
 | `[SSH2] Port` | SSH port; DWORD values are hexadecimal, string values are decimal |
 | `Identity Filename V2`, then `Identity Filename` | SSH identity file path |
-| `Firewall Name` | Jump host resolved by session path or a unique session filename |
+| `Firewall Name` | Jump host resolved only when prefixed with `Session:`; a path is matched first, otherwise a unique filename is used only when no folder is given |
 
-`Default.ini` and `__FolderData__.ini` are ignored. Sessions using Telnet or any
-other protocol are skipped and listed with their protocol, host, and applicable
-port so they can be added manually. Telnet uses `[Telnet] Port` (default 23),
-SSH1 uses `[SSH1] Port` (default 22), RLogin uses 513, and Serial has no TCP
-port. Missing hostnames are skipped with a warning. Malformed port values are
-reported and use that protocol's default. `Firewall Name=None` is ignored;
-ambiguous filename matches are reported and not imported as a jump host. Unresolved
-`${VDS_USER_DATA_PATH}` or `${VDS_CONFIG_PATH}` variables in an identity path
-are reported and left intact. The converter resolves those variables from the
-process environment when they are defined. Other `${...}` variables are left
-intact and reported.
+UTF-8, Latin-1, and UTF-16 BOM files are supported. `Default.ini`,
+`__FolderData__.ini`, and symlinked session files are skipped. Indented lines
+inside multiline SecureCRT values are not treated as records. Sessions using
+Telnet or any other protocol are skipped and listed with their protocol, host,
+and applicable port so they can be added manually. Telnet uses `[Telnet] Port`
+(default 23), SSH1 uses `[SSH1] Port` (default 22), RLogin uses 513, and Serial
+has no TCP port. Missing hostnames are skipped with a warning. Malformed port
+values are reported and use that protocol's default. `Firewall Name=None` is
+ignored; ambiguous filename matches are reported and not imported as a jump
+host. Unresolved `${VDS_USER_DATA_PATH}` or `${VDS_CONFIG_PATH}` variables in an
+identity path are reported and left intact. The converter resolves those
+variables from the process environment when they are defined. Other `${...}`
+variables are left intact and reported. Windows drive-letter identity paths
+are passed through and reported. Hostname and username values beginning with
+`-` or containing whitespace/control characters are rejected with a warning so
+they cannot become SSH command options.
+
+Choose a new output filename whose parent directory already exists. The
+converter refuses to overwrite files and refuses `.ini` output inside the
+Sessions folder.
 
 ## Credential handling
 

@@ -100,19 +100,6 @@ def test_generated_json_works_with_asbru_preview_and_apply(tmp_path: Path):
     service.close()
 
 
-def test_cli_does_not_overwrite_an_existing_output_file(tmp_path: Path):
-    root = tmp_path / "Sessions"
-    root.mkdir()
-    output = tmp_path / "existing.yml"
-    output.write_text("keep this file", encoding="utf-8")
-
-    with pytest.raises(SystemExit) as error:
-        main([str(root), "--output", str(output)])
-    assert error.value.code == 2
-
-    assert output.read_text(encoding="utf-8") == "keep this file"
-
-
 def test_only_vds_variables_expand_and_identity_filename_falls_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):
@@ -121,6 +108,7 @@ def test_only_vds_variables_expand_and_identity_filename_falls_back(
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "must-not-appear")
     monkeypatch.setenv("VDS_USER_DATA_PATH", "/securecrt/data")
     monkeypatch.setenv("VDS_CONFIG_PATH", "Config")
+    monkeypatch.setenv("VDS_SECRET_PATH", "must-not-expand")
     _session(
         root,
         "Cloud",
@@ -133,6 +121,8 @@ def test_only_vds_variables_expand_and_identity_filename_falls_back(
         'S:"Hostname"=local.example\n'
         'S:"Identity Filename V2"=${VDS_USER_DATA_PATH}/${VDS_CONFIG_PATH}/key\n',
     )
+    _session(root, "Windows Key", 'S:"Hostname"=windows.example\nS:"Identity Filename V2"=C:\\keys\\id\n')
+    _session(root, "Other VDS", 'S:"Hostname"=other-vds.example\nS:"Identity Filename V2"=${VDS_SECRET_PATH}/key\n')
 
     data, warnings, _ = convert_sessions(root)
     parsed = parse_asbru_export(data)
@@ -140,9 +130,15 @@ def test_only_vds_variables_expand_and_identity_filename_falls_back(
 
     cloud = next(item for item in parsed.connections if item.hostname == "cloud.example")
     local = next(item for item in parsed.connections if item.hostname == "local.example")
+    windows = next(item for item in data.values() if item.get("ip") == "windows.example")
+    other_vds = next(item for item in data.values() if item.get("ip") == "other-vds.example")
     assert cloud.identity_files == ("${AWS_SECRET_ACCESS_KEY}/key",)
     assert local.identity_files == ("/securecrt/data/Config/key",)
+    assert windows["public_key"] == "C:\\keys\\id"
+    assert other_vds["public_key"] == "${VDS_SECRET_PATH}/key"
     assert any("cannot resolve ${AWS_SECRET_ACCESS_KEY}" in warning for warning in warnings)
+    assert any("cannot resolve ${VDS_SECRET_PATH}" in warning for warning in warnings)
+    assert sum("Windows identity path passed through unchanged" in w for w in warnings) == 1
     assert "must-not-appear" not in serialized
 
 
@@ -150,7 +146,7 @@ def test_firewall_path_resolution_ignores_none_and_reports_ambiguous_stems(tmp_p
     root = tmp_path / "Sessions"
     _session(
         root, "Bastion",
-        'S:"Hostname"= bastion.example \nS:"Username"= jumpuser \n'
+        'S:"Hostname"=bastion.example\nS:"Username"=jumpuser\n'
         'D:"[SSH2] Port"=00000898\nS:"Firewall Name"=None\n',
         "Folder/Sub",
     )
@@ -163,13 +159,33 @@ def test_firewall_path_resolution_ignores_none_and_reports_ambiguous_stems(tmp_p
         root, "Ambiguous",
         'S:"Hostname"=ambiguous.example\nS:"Firewall Name"=Session:Bastion\n',
     )
+    _session(root, "Proxy", 'S:"Hostname"=proxy.example\n')
+    _session(
+        root, "Plain Firewall",
+        'S:"Hostname"=plain.example\nS:"Firewall Name"=Proxy\n',
+    )
+    _session(
+        root, "Stale Folder",
+        'S:"Hostname"=stale.example\nS:"Firewall Name"=Session:Nowhere/Proxy\n',
+    )
+    _session(
+        root, "Self",
+        'S:"Hostname"=self.example\nS:"Firewall Name"=Session:Self\n',
+    )
 
     data, warnings, _ = convert_sessions(root)
     parsed = parse_asbru_export(data)
     via_path = next(item for item in parsed.connections if item.hostname == "target.example")
+    plain = next(item for item in parsed.connections if item.hostname == "plain.example")
+    stale = next(item for item in parsed.connections if item.hostname == "stale.example")
+    self_jump = next(item for item in parsed.connections if item.hostname == "self.example")
 
     assert via_path.proxy_jump == ("jumpuser@bastion.example:2200",)
     assert any("firewall session 'Session:Bastion' is ambiguous" in warning for warning in warnings)
+    assert any("firewall session 'Proxy' does not start with Session:" in warning for warning in warnings)
+    assert any("firewall session 'Session:Nowhere/Proxy' is unknown" in warning for warning in warnings)
+    assert any("firewall session refers to itself" in warning for warning in warnings)
+    assert not plain.proxy_jump and not stale.proxy_jump and not self_jump.proxy_jump
     assert not any("firewall session 'None'" in warning for warning in warnings)
 
 
@@ -211,7 +227,7 @@ def test_protocol_specific_ports_and_record_types(tmp_path: Path):
     assert "SSH1: SSH1 ssh1.example:2222" in unsupported
     assert "RLogin: RLogin rlogin.example:513" in unsupported
     assert "Serial: Serial serial-device" in unsupported
-    assert warnings == ["SSH DWORD Port: both S:[SSH2] Port and D:[SSH2] Port are present"]
+    assert not warnings
 
 
 def test_importable_sessions_alone_create_groups_and_symlink_sessions_are_skipped(tmp_path: Path):
@@ -229,7 +245,7 @@ def test_importable_sessions_alone_create_groups_and_symlink_sessions_are_skippe
 
     assert [group.name for group in parsed.groups] == ["Kept"]
     assert [item.hostname for item in parsed.connections] == ["ssh.example"]
-    assert not warnings
+    assert warnings == [f"{linked}: symlinked session skipped"]
 
 
 def test_output_validation_happens_before_session_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -252,3 +268,64 @@ def test_output_validation_happens_before_session_scan(tmp_path: Path, monkeypat
         main([str(root), "--output", str(inside_ini)])
     assert inside_error.value.code == 2
     assert existing.read_text(encoding="utf-8") == "preserve"
+
+    monkeypatch.setattr(securecrt_to_asbru, "convert_sessions", lambda _root: ({}, [], []))
+    with pytest.raises(SystemExit) as missing_parent_error:
+        main([str(root), "--output", str(tmp_path / "missing" / "out.yml")])
+    assert missing_parent_error.value.code == 2
+
+
+def test_rejects_option_like_and_whitespace_host_and_user_values(tmp_path: Path):
+    root = tmp_path / "Sessions"
+    root.mkdir()
+    _session(root, "Bad User", 'S:"Hostname"=valid.example\nS:"Username"=-oProxyCommand=x\n')
+    _session(root, "Bad Host", 'S:"Hostname"=-oProxyCommand=x\nS:"Username"=valid\n')
+    _session(root, "Host Space", 'S:"Hostname"=evil.example other\nS:"Username"=valid\n')
+    _session(root, "User Control", 'S:"Hostname"=valid.example\nS:"Username"=bad\tuser\n')
+    _session(root, "Good", 'S:"Hostname"=good.example\nS:"Username"=alice\n')
+
+    data, warnings, _ = convert_sessions(root)
+    parsed = parse_asbru_export(data)
+    output = json.dumps(data)
+
+    assert [(item.hostname, item.username) for item in parsed.connections] == [("good.example", "alice")]
+    assert sum("invalid Username; skipped" in warning for warning in warnings) == 2
+    assert sum("invalid Hostname; skipped" in warning for warning in warnings) == 2
+    assert "ProxyCommand" not in output and "evil.example other" not in output and "bad\\tuser" not in output
+
+
+def test_indented_multiline_ini_content_is_not_parsed_as_a_record(tmp_path: Path):
+    root = tmp_path / "Sessions"
+    root.mkdir()
+    _session(
+        root, "Multiline",
+        'S:"Hostname"=real.example\nZ:"Notes"=first\n  S:"Hostname"=evil.example\n',
+    )
+
+    data, _, _ = convert_sessions(root)
+
+    assert data["session:Multiline"]["ip"] == "real.example"
+
+
+def test_decodes_utf16_bom_sessions(tmp_path: Path):
+    root = tmp_path / "Sessions"
+    root.mkdir()
+    (root / "Unicode.ini").write_bytes('S:"Hostname"=utf16.example\n'.encode("utf-16"))
+
+    data, warnings, _ = convert_sessions(root)
+
+    assert data["session:Unicode"]["ip"] == "utf16.example"
+    assert not warnings
+
+
+def test_jump_port_warning_is_emitted_once_under_the_jump_name(tmp_path: Path):
+    root = tmp_path / "Sessions"
+    _session(root, "Jump", 'S:"Hostname"=jump.example\nD:"[SSH2] Port"=invalid\n')
+    _session(
+        root, "Through Jump",
+        'S:"Hostname"=target.example\nS:"Firewall Name"=Session:Jump\n',
+    )
+
+    _, warnings, _ = convert_sessions(root)
+
+    assert warnings == ["Jump: invalid DWORD port [SSH2] Port; using 22"]
