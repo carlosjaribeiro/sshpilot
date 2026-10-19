@@ -214,6 +214,7 @@ def _compile(profile: str, theme: str) -> _Compiled:
     )
 
 
+# Only the SecureCRT profile has themes; legacy profiles share one entry.
 _COMPILED: Dict[Tuple[str, str], _Compiled] = {}
 
 _NEXT_RE = re.compile(rb"\x1b|\xc2(?:[\x80-\x9f]|\Z)")
@@ -247,16 +248,14 @@ class Highlighter:
         self.set_profile(profile)
         self.reset()
 
-    def set_profile(self, profile: str) -> None:
-        self.profile = normalize_profile(profile)
-        key = self.profile, self.theme
+    def set_profile(self, profile: str, theme: Optional[str] = None) -> None:
+        """Switch rules; nothing changes unless compiling succeeded."""
+        profile = normalize_profile(profile)
+        theme = self.theme if theme is None else normalize_theme(theme)
+        key = profile, theme if profile == "cisco-securecrt" else ""
         if key not in _COMPILED:
             _COMPILED[key] = _compile(*key)
-        self._compiled = _COMPILED[key]
-
-    def set_theme(self, theme: str) -> None:
-        self.theme = normalize_theme(theme)
-        self.set_profile(self.profile)
+        self.profile, self.theme, self._compiled = profile, theme, _COMPILED[key]
 
     def configure(self, enabled: bool, profile: str, theme: Optional[str] = None) -> bytes:
         """Apply settings without losing stream state.
@@ -265,9 +264,7 @@ class Highlighter:
         (non-empty only when switching off mid-escape).
         """
         old_style = self.profile, self.theme
-        if theme is not None:
-            self.theme = normalize_theme(theme)
-        self.set_profile(profile)
+        self.set_profile(profile, theme)
         if old_style != (self.profile, self.theme):
             self._line_rule = None
         flushed = b""
@@ -290,10 +287,18 @@ class Highlighter:
         self._ctx = b""  # plain text before the carry: lookbehind for validators
         self._shown = 0  # leading bytes of _hold already displayed
         self._line_rule: Optional[Tuple[int, CompiledRule]] = None
+        # No text yet on the current line; and the same for the start of the
+        # carried context (the next window), for ``^`` rules.
+        self._at_line_start = self._ctx_at_line_start = True
         self._reset_sgr()
 
     def _reset_sgr(self) -> None:
-        self._fg = self._bg = self._reverse = self._conceal = self._bold = False
+        self._fg = self._bg = self._reverse = self._conceal = False
+        self._bold = self._faint = False
+
+    def _track_line_start(self, text: bytes) -> None:
+        if text:
+            self._at_line_start = not text[max(text.rfind(b"\r"), text.rfind(b"\n")) + 1:]
 
     def feed(self, data: bytes) -> bytes:
         if (
@@ -304,6 +309,7 @@ class Highlighter:
             and b"\xc2" not in data  # UTF-8 C1 controls
         ):
             self._carry = self._ctx = b""
+            self._track_line_start(data)
             return data  # nothing that changes tracked state: skip the scan
         shown, self._shown = self._shown, 0
         buf = self._hold + bytes(data)
@@ -395,8 +401,12 @@ class Highlighter:
                 self._conceal = False
             elif code == 1:
                 self._bold = True
-            elif code in (21, 22):
+            elif code == 2:
+                self._faint = True
+            elif code == 21:
                 self._bold = False
+            elif code == 22:
+                self._bold = self._faint = False
             elif code == 39:
                 self._fg = False
             elif code == 49:
@@ -417,6 +427,8 @@ class Highlighter:
 
     def _text(self, text: bytes, last: bool) -> bytes:
         ctx, carry, self._ctx, self._carry = self._ctx, self._carry, b"", b""
+        line_start = self._ctx_at_line_start if ctx or carry else self._at_line_start
+        self._track_line_start(text)
         if (
             not self.enabled
             or self._alt_modes
@@ -433,9 +445,10 @@ class Highlighter:
         skip = len(ctx) + len(carry)
         if priority_rules:
             result, self._line_rule = highlight_priority(
-                full, skip, priority_rules, self._line_rule, self._bold,
+                full, skip, priority_rules, self._line_rule, self._bold, self._faint,
+                line_start,
             )
-            self._remember_tail(full, last)
+            self._remember_tail(full, last, line_start)
             return result
         parts: List[bytes] = []
         pos = 0
@@ -452,19 +465,23 @@ class Highlighter:
             parts.append(full[start:m.end()])
             parts.append(b"\x1b[39m")
             pos = m.end()
-        self._remember_tail(full, last)
+        self._remember_tail(full, last, line_start)
         if not parts:
             return text
         parts.append(full[max(pos, skip):])
         return b"".join(parts)
 
-    def _remember_tail(self, full: bytes, last: bool) -> None:
+    def _remember_tail(self, full: bytes, last: bool, line_start: bool) -> None:
         if last:
             tail = _TAIL_RE.search(full, max(0, len(full) - _CARRY_MAX - 1)).group()
             if len(tail) <= _CARRY_MAX:
                 self._carry = tail
                 keep = len(full) - len(tail)
-                self._ctx = full[max(0, keep - _CTX_MAX):keep]
+                begin = max(0, keep - _CTX_MAX)
+                self._ctx = full[begin:keep]
+                self._ctx_at_line_start = (
+                    full[begin - 1:begin] in (b"\r", b"\n") if begin else line_start
+                )
 
 def apply_config(highlighter: Highlighter, config: object) -> bytes:
     """Sync ``highlighter`` with the terminal highlight settings.

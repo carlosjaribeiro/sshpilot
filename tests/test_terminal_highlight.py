@@ -17,13 +17,26 @@ from sshpilot.terminal_highlight import (
 )
 from sshpilot.terminal_highlight_securecrt import (
     SECURECRT_RULES,
+    THEME_COLOURS,
     colourref_to_rgb,
+    compile_rules,
     load_rules,
     style_bytes,
 )
 
 SGR = re.compile(rb"\x1b\[[0-9;]*m")
 LEGACY_PROFILES = tuple(profile for profile in PROFILES if profile != "cisco-securecrt")
+
+
+@pytest.fixture(autouse=True)
+def _no_user_rules(tmp_path_factory, monkeypatch):
+    """Keep compile_rules hermetic: no user rules file and no cached compile."""
+    import sshpilot.terminal_highlight as highlight
+    import sshpilot.terminal_highlight_securecrt as securecrt
+
+    empty = tmp_path_factory.mktemp("no-user-rules")
+    monkeypatch.setattr(securecrt, "get_config_dir", lambda: empty)
+    monkeypatch.setattr(highlight, "_COMPILED", {})
 
 
 def colour(text, code):
@@ -888,26 +901,6 @@ def test_securecrt_captured_cisco_output_exact_roles():
     assert truecolour(b"Invalid", (255, 0, 0)) in out
 
 
-@pytest.mark.parametrize(
-    "text, coloured",
-    [
-        (b"no shutdown", True),
-        (b"snooping", False),
-        (b"Notification", False),
-        (b"configuration", False),
-        (b"description no uplink", True),
-        (b"des", True),
-        (b"des56", True),
-        (b"3des", False),
-        (b"des56x", False),
-    ],
-)
-def test_securecrt_plain_words_use_ascii_alphanumeric_boundaries(text, coloured):
-    out = run("cisco-securecrt", text)
-    assert (b"\x1b[" in out) is coloured
-    assert strip(out) == text
-
-
 def test_securecrt_plain_word_boundaries_exact_bytes():
     red = lambda value: truecolour(value, (255, 0, 0))
     misc = lambda value: truecolour(value, (128, 0, 0))
@@ -1027,3 +1020,282 @@ def test_highlight_defaults_and_preferences_handlers():
     assert config.__dict__["terminal.highlight_profile"] == "cisco-securecrt"
     PreferencesWindow.on_highlight_theme_changed(prefs, combo, None)
     assert config.__dict__["terminal.highlight_theme"] == "light"
+
+
+# --- SecureCRT review blockers (B1-B7) and follow-ups -------------------------
+
+RED, GREEN, IFACE = (255, 0, 0), (0, 215, 54), (0, 105, 210)
+IP, SECRET, MAC, REMARK = (0, 174, 0), (255, 128, 64), (0, 128, 64), (0, 100, 0)
+
+
+@pytest.mark.parametrize(
+    "text, rgb",
+    [
+        (b"Gi0/10", IFACE),
+        (b"Fa0/1", IFACE),
+        (b"YES", GREEN),
+        (b"--More--", RED),
+        (b"EC:8E:77:17:60:C9", MAC),
+    ],
+)
+def test_securecrt_rules_ignore_case_like_match_case_off(text, rgb):
+    assert run("cisco-securecrt", text) == truecolour(text, rgb)
+
+
+def test_securecrt_importer_honours_match_case_flag(tmp_path):
+    for flag, matches in (("00000000", True), ("00000001", False)):
+        path = tmp_path / f"rules-{flag}.ini"
+        path.write_text(f'D:"Match Case"={flag}\n"hello",0000ae00\n', encoding="utf-8")
+        (rule,) = load_rules(path)
+        assert rule.match_case is not matches
+        flags = 0 if rule.match_case else re.IGNORECASE
+        assert bool(re.fullmatch(rule.pattern, "HELLO", flags)) is matches
+
+
+@pytest.mark.parametrize(
+    "text, rgb",
+    [(b"up\r\n", GREEN), (b"GigabitEthernet0/1\r\n", IFACE), (b"@@@\r\n", REMARK)],
+)
+def test_securecrt_dollar_means_end_of_line(text, rgb):
+    token = text[:-2]
+    assert run("cisco-securecrt", text) == truecolour(token, rgb) + b"\r\n"
+    assert run("cisco-securecrt", token, b"\r\n") == truecolour(token, rgb) + b"\r\n"
+
+
+def test_securecrt_show_ip_interface_brief_last_column_is_coloured():
+    row = b"Vlan1                  10.0.0.1        YES NVRAM  up                    up\r\n"
+    assert run("cisco-securecrt", row).endswith(b" " + truecolour(b"up", GREEN) + b"\r\n")
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        (
+            b"GigabitEthernet0/1 is down, line protocol is up (connected)",
+            truecolour(b"GigabitEthernet0/1 is down,", RED) + b" "
+            + truecolour(b"line", IFACE) + b" " + truecolour(b"protocol", (128, 0, 0))
+            + b" is " + truecolour(b"up", GREEN) + b" (connected)",
+        ),
+        (
+            b"pre-shared-key abc 10.0.0.1",
+            truecolour(b"pre-shared-key", SECRET) + b" abc " + truecolour(b"10.0.0.1", IP),
+        ),
+        (
+            b"SYS_ERR: then 10.0.0.1 text",
+            truecolour(b"SYS_ERR:", RED) + b" then " + truecolour(b"10.0.0.1", IP) + b" text",
+        ),
+    ],
+)
+def test_securecrt_prefix_only_rules_colour_line_start_to_trigger(text, expected):
+    assert run("cisco-securecrt", text) == expected
+
+
+@pytest.mark.parametrize("token", [b"-more-", b"on-fail ", b"fail ", b"down "])
+def test_securecrt_repeated_triggers_are_linear(token):
+    data = (token * (32 * 1024 // len(token) + 1))[:32 * 1024]
+    started = time.monotonic()
+    out = run("cisco-securecrt", data)
+    assert time.monotonic() - started < 0.5
+    assert strip(out) == data
+
+
+def test_securecrt_long_continuation_without_newline_is_linear():
+    highlighter = Highlighter("cisco-securecrt")
+    data = (b"fail " * (640 * 1024 // 5 + 1))[:640 * 1024]
+    started = time.monotonic()
+    slowest = 0.0
+    out = []
+    for offset in range(0, len(data), 4096):
+        chunk_started = time.monotonic()
+        out.append(highlighter.feed(data[offset:offset + 4096]))
+        slowest = max(slowest, time.monotonic() - chunk_started)
+    assert time.monotonic() - started < 2.5
+    assert slowest < 0.1
+    assert strip(b"".join(out)) == data
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        r"((a+))+$",
+        r"a*a*a*a*a*a*b",
+        r"\w+\w+\w+\w+\w+!",
+        r".*.*.*.*.*x",
+        r"(a?){30}a{30}",
+        r"a{1,100000}",
+    ],
+)
+def test_custom_loader_rejects_hostile_patterns(pattern, tmp_path, caplog):
+    path = tmp_path / "highlight_rules.conf"
+    path.write_text(f'"{pattern}",bad\n', encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        assert load_rules(path) == []
+    assert "Skipping invalid highlight rule" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "pattern, text",
+    [
+        (r"\bmaintenance\b", "maintenance"),
+        (r"site-[0-9]{1,3}", "site-42"),
+        (r"[.*]x", "*x"),
+        (r"\.*foo", "..foo"),
+        (r"err(?:or|no)", "errno"),
+        (r"^Router#", "Router#"),
+        (r"done$", "done"),
+        (r"colou?r", "color"),
+    ],
+)
+def test_custom_loader_accepts_simple_patterns_verbatim(pattern, text, tmp_path):
+    path = tmp_path / "highlight_rules.conf"
+    path.write_text(f'"{pattern}",bad\n', encoding="utf-8")
+    (rule,) = load_rules(path)
+    assert re.search(rule.pattern, "\n" + text + "\n")
+
+
+def test_hostile_and_simple_custom_rules_keep_feed_fast(tmp_path, monkeypatch):
+    import sshpilot.terminal_highlight_securecrt as securecrt
+
+    rules = [r"((a+))+$", r"a*a*a*a*a*a*b", r"\w+\w+\w+\w+\w+!", r".*.*.*.*.*x",
+             r"(a?){30}a{30}", r"a{1,100000}", r".*.*x", r"\w+\w+!"]
+    (tmp_path / "highlight_rules.conf").write_text(
+        "".join(f'"{rule}",bad\n' for rule in rules), encoding="utf-8"
+    )
+    monkeypatch.setattr(securecrt, "get_config_dir", lambda: tmp_path)
+    highlighter = Highlighter("cisco-securecrt")
+    started = time.monotonic()
+    assert strip(highlighter.feed(b"a" * 3000)) == b"a" * 3000
+    assert time.monotonic() - started < 0.25
+
+
+def test_custom_loader_never_raises_on_bad_files(tmp_path, monkeypatch, caplog):
+    import sshpilot.terminal_highlight_securecrt as securecrt
+
+    latin1 = tmp_path / "latin1.conf"
+    latin1.write_bytes('"café",good\n'.encode("latin-1"))
+    huge_field = tmp_path / "field.conf"
+    huge_field.write_text('"' + "a" * 140000 + '",good\n"hello",good\n', encoding="utf-8")
+    oversized = tmp_path / "large.conf"
+    oversized.write_bytes(b"#" * (256 * 1024 + 1))
+    crowded = tmp_path / "crowded.conf"
+    crowded.write_text('"hello",good\n' * 501, encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        assert load_rules(latin1) == []
+        assert [rule.source for rule in load_rules(huge_field)] == ["hello"]
+        assert load_rules(oversized) == []
+        assert len(load_rules(crowded)) == 500
+    assert "Cannot load highlight rules" in caplog.text
+    assert "after the first 500" in caplog.text
+
+    rules_dir = tmp_path / "config"
+    rules_dir.mkdir()
+    (rules_dir / "highlight_rules.conf").write_bytes(latin1.read_bytes())
+    monkeypatch.setattr(securecrt, "get_config_dir", lambda: rules_dir)
+    assert len(compile_rules("securecrt")) == len(SECURECRT_RULES)
+    h = Highlighter()
+    h.configure(True, "cisco-securecrt", "dark")
+    assert (h.profile, h.theme) == ("cisco-securecrt", "dark")
+
+
+def test_configure_is_atomic_when_compiling_fails(monkeypatch):
+    import sshpilot.terminal_highlight as highlight
+
+    h = Highlighter("generic", theme="securecrt")
+
+    def broken(*_args):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(highlight, "_compile", broken)
+    with pytest.raises(RuntimeError):
+        h.configure(True, "cisco-securecrt", "dark")
+    assert (h.profile, h.theme) == ("generic", "securecrt")
+    assert h.feed(b"Gi0/1 10.0.0.1") == run("generic", b"Gi0/1 10.0.0.1")
+
+
+def _style_map(data):
+    """Each visible byte paired with the SGR that is active for it."""
+    active, mapped, position = b"", [], 0
+    for match in SGR.finditer(data):
+        mapped.extend((byte, active) for byte in data[position:match.start()])
+        active = b"" if match.group() in (b"\x1b[39m", b"\x1b[22;39m") else match.group()
+        position = match.end()
+    return mapped + [(byte, active) for byte in data[position:]]
+
+
+@pytest.mark.parametrize(
+    "line, trigger",
+    [
+        (b"x fail 10.0.0.1 and 10.0.0.2 here", b"fail"),
+        (b"Gi0/1 -more- 10.0.0.1 Gi0/2 up", b"-more-"),
+        (b"username admin password 10.0.0.1 x", b"username"),
+    ],
+)
+def test_securecrt_continuation_is_split_invariant(line, trigger):
+    whole = run("cisco-securecrt", line)
+    if trigger == b"fail":
+        assert whole == b"x " + truecolour(b"fail 10.0.0.1 and 10.0.0.2 here", RED)
+    trigger_end = line.index(trigger) + len(trigger)
+    for cut in range(len(line) + 1):
+        pair = line[cut - 1:cut + 1]
+        if 0 < cut < len(line) and b" " not in pair and (cut < trigger_end or pair.isalnum()):
+            # The shown part of a split token cannot be repainted, and a chunk
+            # ending in a complete keyword ("h" = misc "H") is decided early.
+            continue
+        assert _style_map(run("cisco-securecrt", line[:cut], line[cut:])) == _style_map(whole)
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [(b"  - \x1b[0mfoo>bar",), (b"  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx ", b"yy>")],
+)
+def test_securecrt_prompt_anchor_is_the_real_line_start(chunks):
+    assert run("cisco-securecrt", *chunks) == b"".join(chunks)
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [(b"sw1>",), (b"\r\nsw1", b">"), (b"x\r", b"sw1>"), (b"\x1b[0msw1>",)],
+)
+def test_securecrt_prompt_at_line_start_is_coloured(chunks):
+    out = run("cisco-securecrt", *chunks)
+    assert out.endswith(b">\x1b[39m") and b"\x1b[38;2;0;128;128m" in out
+    assert strip(out) == b"".join(chunks).replace(b"\x1b[0m", b"")
+
+
+def test_securecrt_bold_span_restores_remote_faint():
+    assert run("cisco-securecrt", b"\x1b[2m[### tail") == (
+        b"\x1b[2m\x1b[1;38;2;0;0;255m[###\x1b[22;2;39m tail"
+    )
+
+
+def _contrast(rgb, background):
+    def luminance(colour):
+        def channel(value):
+            value /= 255
+            return value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+
+        return sum(w * channel(v) for w, v in zip((0.2126, 0.7152, 0.0722), colour))
+
+    high, low = sorted((luminance(rgb), luminance(background)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+def test_theme_palettes_are_readable():
+    assert all(b"[37m" not in rule.opening for rule in compile_rules("terminal-palette"))
+    for role in ("wwn", "version", "serial", "secret", "acl", "acl_hit", "acl_zero",
+                 "syslog_header", "syslog"):
+        assert _contrast(THEME_COLOURS["light"][role], (255, 255, 255)) >= 4.5, role
+    for role in ("misc", "services"):
+        assert _contrast(THEME_COLOURS["dark"][role], (0, 0, 0)) >= 4.5, role
+
+
+def test_compile_cache_ignores_theme_for_legacy_profiles():
+    import sshpilot.terminal_highlight as highlight
+
+    Highlighter("junos", theme="dark")
+    Highlighter("junos", theme="light")
+    Highlighter("cisco-securecrt", theme="dark")
+    Highlighter("cisco-securecrt", theme="light")
+    assert sorted(highlight._COMPILED) == [
+        ("cisco-securecrt", "dark"), ("cisco-securecrt", "light"), ("junos", ""),
+    ]
