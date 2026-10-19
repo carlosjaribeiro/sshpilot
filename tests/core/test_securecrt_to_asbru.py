@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from scripts.securecrt_to_asbru import convert_sessions, main
 from sshpilot.api.models.connections import AsbruImportRequest
 from sshpilot.core.connection_application_service import ConnectionApplicationService
@@ -104,11 +106,149 @@ def test_cli_does_not_overwrite_an_existing_output_file(tmp_path: Path):
     output = tmp_path / "existing.yml"
     output.write_text("keep this file", encoding="utf-8")
 
-    try:
+    with pytest.raises(SystemExit) as error:
         main([str(root), "--output", str(output)])
-    except FileExistsError:
-        pass
-    else:
-        raise AssertionError("converter overwrote an existing file")
+    assert error.value.code == 2
 
     assert output.read_text(encoding="utf-8") == "keep this file"
+
+
+def test_only_vds_variables_expand_and_identity_filename_falls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    root = tmp_path / "Sessions"
+    root.mkdir()
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "must-not-appear")
+    monkeypatch.setenv("VDS_USER_DATA_PATH", "/securecrt/data")
+    monkeypatch.setenv("VDS_CONFIG_PATH", "Config")
+    _session(
+        root,
+        "Cloud",
+        'S:"Hostname"=cloud.example\nS:"Identity Filename V2"=\n'
+        'S:"Identity Filename"=${AWS_SECRET_ACCESS_KEY}/key\n',
+    )
+    _session(
+        root,
+        "Local",
+        'S:"Hostname"=local.example\n'
+        'S:"Identity Filename V2"=${VDS_USER_DATA_PATH}/${VDS_CONFIG_PATH}/key\n',
+    )
+
+    data, warnings, _ = convert_sessions(root)
+    parsed = parse_asbru_export(data)
+    serialized = json.dumps(data)
+
+    cloud = next(item for item in parsed.connections if item.hostname == "cloud.example")
+    local = next(item for item in parsed.connections if item.hostname == "local.example")
+    assert cloud.identity_files == ("${AWS_SECRET_ACCESS_KEY}/key",)
+    assert local.identity_files == ("/securecrt/data/Config/key",)
+    assert any("cannot resolve ${AWS_SECRET_ACCESS_KEY}" in warning for warning in warnings)
+    assert "must-not-appear" not in serialized
+
+
+def test_firewall_path_resolution_ignores_none_and_reports_ambiguous_stems(tmp_path: Path):
+    root = tmp_path / "Sessions"
+    _session(
+        root, "Bastion",
+        'S:"Hostname"= bastion.example \nS:"Username"= jumpuser \n'
+        'D:"[SSH2] Port"=00000898\nS:"Firewall Name"=None\n',
+        "Folder/Sub",
+    )
+    _session(root, "Bastion", 'S:"Hostname"=other.example\n', "Other")
+    _session(
+        root, "Via Path",
+        'S:"Hostname"=target.example\nS:"Firewall Name"=Session:Folder\\Sub\\Bastion\n',
+    )
+    _session(
+        root, "Ambiguous",
+        'S:"Hostname"=ambiguous.example\nS:"Firewall Name"=Session:Bastion\n',
+    )
+
+    data, warnings, _ = convert_sessions(root)
+    parsed = parse_asbru_export(data)
+    via_path = next(item for item in parsed.connections if item.hostname == "target.example")
+
+    assert via_path.proxy_jump == ("jumpuser@bastion.example:2200",)
+    assert any("firewall session 'Session:Bastion' is ambiguous" in warning for warning in warnings)
+    assert not any("firewall session 'None'" in warning for warning in warnings)
+
+
+def test_protocol_specific_ports_and_record_types(tmp_path: Path):
+    root = tmp_path / "Sessions"
+    root.mkdir()
+    _session(
+        root, "SSH String Port",
+        'S:"Hostname"=string.example\nS:"[SSH2] Port"=22\nS:"Port"=bad\n',
+    )
+    _session(
+        root, "SSH DWORD Port",
+        'S:"Hostname"=dword.example\nS:"[SSH2] Port"=22\n'
+        'D:"[SSH2] Port"=000008ae\n',
+    )
+    _session(
+        root, "Telnet Default",
+        'S:"Protocol Name"=Telnet\nS:"Hostname"=telnet.example\nS:"Port"=bad\n',
+    )
+    _session(
+        root, "Telnet Custom",
+        'S:"Protocol Name"=Telnet\nS:"Hostname"=telnet2.example\n'
+        'D:"[Telnet] Port"=0000270f\n',
+    )
+    _session(
+        root, "SSH1",
+        'S:"Protocol Name"=SSH1\nS:"Hostname"=ssh1.example\nS:"[SSH1] Port"=2222\n',
+    )
+    _session(root, "RLogin", 'S:"Protocol Name"=RLogin\nS:"Hostname"=rlogin.example\n')
+    _session(root, "Serial", 'S:"Protocol Name"=Serial\nS:"Hostname"=serial-device\nS:"Port"=bad\n')
+
+    data, warnings, unsupported = convert_sessions(root)
+    parsed = parse_asbru_export(data)
+    ssh_ports = {item.hostname: item.port for item in parsed.connections}
+
+    assert ssh_ports == {"string.example": 22, "dword.example": 2222}
+    assert "Telnet Default: Telnet telnet.example:23" in unsupported
+    assert "Telnet Custom: Telnet telnet2.example:9999" in unsupported
+    assert "SSH1: SSH1 ssh1.example:2222" in unsupported
+    assert "RLogin: RLogin rlogin.example:513" in unsupported
+    assert "Serial: Serial serial-device" in unsupported
+    assert warnings == ["SSH DWORD Port: both S:[SSH2] Port and D:[SSH2] Port are present"]
+
+
+def test_importable_sessions_alone_create_groups_and_symlink_sessions_are_skipped(tmp_path: Path):
+    root = tmp_path / "Sessions"
+    _session(root, "Telnet", 'S:"Protocol Name"=Telnet\nS:"Hostname"=telnet.example\n', "Empty")
+    valid = _session(root, "SSH", 'S:"Hostname"=ssh.example\n', "Kept")
+    linked = root / "Linked.ini"
+    try:
+        linked.symlink_to(valid)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    data, warnings, _ = convert_sessions(root)
+    parsed = parse_asbru_export(data)
+
+    assert [group.name for group in parsed.groups] == ["Kept"]
+    assert [item.hostname for item in parsed.connections] == ["ssh.example"]
+    assert not warnings
+
+
+def test_output_validation_happens_before_session_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from scripts import securecrt_to_asbru
+
+    root = tmp_path / "Sessions"
+    root.mkdir()
+    existing = tmp_path / "existing.yml"
+    existing.write_text("preserve", encoding="utf-8")
+    inside_ini = root / "converted.ini"
+
+    def unexpected_scan(_root: Path):
+        raise AssertionError("sessions were scanned before output validation")
+
+    monkeypatch.setattr(securecrt_to_asbru, "convert_sessions", unexpected_scan)
+    with pytest.raises(SystemExit) as existing_error:
+        main([str(root), "--output", str(existing)])
+    assert existing_error.value.code == 2
+    with pytest.raises(SystemExit) as inside_error:
+        main([str(root), "--output", str(inside_ini)])
+    assert inside_error.value.code == 2
+    assert existing.read_text(encoding="utf-8") == "preserve"

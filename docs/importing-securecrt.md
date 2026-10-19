@@ -36,17 +36,21 @@ Keep the output path separate from the SecureCRT Sessions directory.
 | `.ini` filename | Connection display name; SSH Pilot sanitizes it to a unique alias |
 | `Hostname`, `Username` | Host and login user |
 | `Protocol Name` set to SSH/SSH2 | Imported as SSH |
-| `[SSH2] Port` DWORD | SSH port (hexadecimal DWORD, for example `00000016` is 22) |
-| `Identity Filename V2` | SSH identity file path |
-| `Firewall Name` | Jump host only when it matches a known SSH session by filename |
+| `[SSH2] Port` | SSH port; DWORD values are hexadecimal, string values are decimal |
+| `Identity Filename V2`, then `Identity Filename` | SSH identity file path |
+| `Firewall Name` | Jump host resolved by session path or a unique session filename |
 
 `Default.ini` and `__FolderData__.ini` are ignored. Sessions using Telnet or any
-other protocol are skipped and listed with their protocol, host, and port so
-they can be added manually. Missing hostnames are skipped with a warning.
-Malformed port DWORDs are reported and default to port 22. Unresolved
+other protocol are skipped and listed with their protocol, host, and applicable
+port so they can be added manually. Telnet uses `[Telnet] Port` (default 23),
+SSH1 uses `[SSH1] Port` (default 22), RLogin uses 513, and Serial has no TCP
+port. Missing hostnames are skipped with a warning. Malformed port values are
+reported and use that protocol's default. `Firewall Name=None` is ignored;
+ambiguous filename matches are reported and not imported as a jump host. Unresolved
 `${VDS_USER_DATA_PATH}` or `${VDS_CONFIG_PATH}` variables in an identity path
 are reported and left intact. The converter resolves those variables from the
-process environment when they are defined.
+process environment when they are defined. Other `${...}` variables are left
+intact and reported.
 
 ## Credential handling
 
