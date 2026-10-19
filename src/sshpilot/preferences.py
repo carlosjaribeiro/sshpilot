@@ -35,6 +35,7 @@ from .terminal_cursor import (
     normalize_cursor_blink,
     normalize_cursor_shape,
 )
+from .terminal_highlight import PROFILES, THEMES, normalize_profile, normalize_theme
 
 
 import gi
@@ -748,6 +749,69 @@ class PreferencesWindow(Adw.Window):
 
         terminal_page.add(cursor_group)
 
+    def _add_terminal_highlight_group(self, terminal_page):
+        """Add the network-output highlighting group."""
+        group = Adw.PreferencesGroup(title=_("Highlighting"))
+
+        self.highlight_switch = Adw.SwitchRow()
+        self.highlight_switch.set_title(_("Highlight Network Output"))
+        self.highlight_switch.set_subtitle(
+            _("Colour IP and MAC addresses, VLANs, interfaces and link status")
+        )
+        self.highlight_switch.set_active(
+            bool(self.config.get_setting('terminal.highlight_enabled', False))
+        )
+        self.highlight_switch.connect('notify::active', self.on_highlight_enabled_changed)
+        group.add(self.highlight_switch)
+
+        self.highlight_profile_row = Adw.ComboRow()
+        self.highlight_profile_row.set_title(_("Highlight Profile"))
+        profile_model = Gtk.StringList()
+        for label in (
+            _("Generic"), _("Cisco IOS"), _("Cisco (SecureCRT-style)"),
+            _("Junos"), _("Huawei VRP"),
+        ):
+            profile_model.append(label)
+        self.highlight_profile_row.set_model(profile_model)
+        current = normalize_profile(self.config.get_setting('terminal.highlight_profile', None))
+        self.highlight_profile_row.set_selected(PROFILES.index(current))
+        self.highlight_profile_row.connect('notify::selected', self.on_highlight_profile_changed)
+        group.add(self.highlight_profile_row)
+
+        self.highlight_theme_row = Adw.ComboRow()
+        self.highlight_theme_row.set_title(_("Highlight Colour Theme"))
+        theme_model = Gtk.StringList()
+        for label in (
+            _("SecureCRT"), _("Dark"), _("Light"), _("High Contrast"),
+            _("Terminal Palette"),
+        ):
+            theme_model.append(label)
+        self.highlight_theme_row.set_model(theme_model)
+        theme = normalize_theme(self.config.get_setting('terminal.highlight_theme', None))
+        self.highlight_theme_row.set_selected(THEMES.index(theme))
+        self.highlight_theme_row.connect('notify::selected', self.on_highlight_theme_changed)
+        # Only the SecureCRT-style profile has colour themes.
+        self.highlight_theme_row.set_sensitive(current == 'cisco-securecrt')
+        group.add(self.highlight_theme_row)
+
+        terminal_page.add(group)
+
+    def on_highlight_enabled_changed(self, switch_row, _param):
+        self.config.set_setting('terminal.highlight_enabled', switch_row.get_active())
+
+    def on_highlight_profile_changed(self, combo_row, _param):
+        index = combo_row.get_selected()
+        if 0 <= index < len(PROFILES):
+            self.config.set_setting('terminal.highlight_profile', PROFILES[index])
+            theme_row = getattr(self, 'highlight_theme_row', None)
+            if theme_row is not None:
+                theme_row.set_sensitive(PROFILES[index] == 'cisco-securecrt')
+
+    def on_highlight_theme_changed(self, combo_row, _param):
+        index = combo_row.get_selected()
+        if 0 <= index < len(THEMES):
+            self.config.set_setting('terminal.highlight_theme', THEMES[index])
+
     def on_cursor_shape_changed(self, combo_row, _param):
         index = combo_row.get_selected()
         if not 0 <= index < len(CURSOR_SHAPES):
@@ -1257,6 +1321,7 @@ class PreferencesWindow(Adw.Window):
 
         self._add_terminal_appearance_groups(terminal_page)
         self._add_terminal_cursor_group(terminal_page)
+        self._add_terminal_highlight_group(terminal_page)
         self._add_terminal_backend_group(terminal_page)
         self._add_terminal_input_groups(terminal_page)
         self._add_terminal_daemon_group(terminal_page)
