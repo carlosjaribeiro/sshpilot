@@ -41,10 +41,10 @@ Details: [highlighting.md](highlighting.md).
 **Settings → Terminal → Session Logging**: switch on *Log Terminal Sessions*, set the
 *Log folder* and the file-name pattern. Example:
 
-- Folder: `C:\Users\carlos\OneDrive - VINCI Energies\Documentos\Logs`
+- Folder: `C:\Users\<user>\Documents\Logs` (Linux: `~/sshpilot-logs`)
 - Pattern: `%Y-%M-%D\%S (%H) -%Y-%M-%D- %h-%m.log`
 
-gives `...\Logs\2026-10-19\web (10.0.0.5) -2026-10-19- 09-30.log`.
+gives `...\Logs\2026-10-19\web (192.0.2.10) -2026-10-19- 09-30.log`.
 
 The log gets the raw output from the daemon *before* highlighting is applied, so it holds
 plain text only: no colour escapes, even with highlighting on.
