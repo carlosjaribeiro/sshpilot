@@ -59,6 +59,11 @@ def get_default_config() -> Dict[str, Any]:
             # base64 per copy.
             'osc52_policy': 'ask',
             'osc52_max_kib': 1024,
+            # SecureCRT-style automatic session logging (terminal_session_log).
+            # Empty folder = <data dir>/logs.
+            'session_log_enabled': False,
+            'session_log_folder': '',
+            'session_log_pattern': '%Y-%M-%D/%S (%H) -%Y-%M-%D- %h-%m.log',
         },
         'secrets': {
             # Secret storage backend: 'auto' (platform default), 'libsecret',

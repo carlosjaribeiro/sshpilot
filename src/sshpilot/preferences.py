@@ -21,6 +21,11 @@ from .gtk.secret_status_messages import format_secret_error, format_secret_messa
 from .shortcut_editor import ShortcutsPreferencesPage
 from .shortcut_utils import install_esc_to_close
 from .monospace_font_dialog import MonospaceFontDialog
+from .terminal_session_log import (
+    DEFAULT_PATTERN as SESSION_LOG_DEFAULT_PATTERN,
+    resolve_log_path,
+    windows_path_on_posix,
+)
 from .terminal_theme_selector import TERMINAL_SCHEME_KEYS, TerminalThemeChooser
 from .terminal_osc52 import (
     OSC52_MAX_MAX_KIB,
@@ -1040,6 +1045,102 @@ class PreferencesWindow(Adw.Window):
 
         self._add_remote_clipboard_group(terminal_page)
 
+    def _add_session_log_group(self, terminal_page):
+        """Automatic session logging: one plain-text file per terminal session."""
+        group = Adw.PreferencesGroup(title=_("Session Logging"))
+        group.set_description(
+            _("Save a plain-text transcript of every terminal session. Applies to "
+              "sessions opened after the change.")
+        )
+
+        self.session_log_switch = Adw.SwitchRow()
+        self.session_log_switch.set_title(_("Log Terminal Sessions"))
+        self.session_log_switch.set_active(
+            self.config.get_setting('terminal.session_log_enabled', False) is True
+        )
+        self.session_log_switch.connect('notify::active', self.on_session_log_enabled_changed)
+        group.add(self.session_log_switch)
+
+        self.session_log_folder_row = Adw.EntryRow(title=_("Log folder"))
+        self.session_log_folder_row.set_text(
+            str(self.config.get_setting('terminal.session_log_folder', '') or '')
+        )
+        self.session_log_folder_row.set_tooltip_text(
+            _("Empty uses the sshPilot data folder (logs). An absolute path in "
+              "the file name pattern overrides this folder.")
+        )
+        browse_btn = Gtk.Button(icon_name='folder-open-symbolic')
+        browse_btn.set_valign(Gtk.Align.CENTER)
+        browse_btn.add_css_class('flat')
+        browse_btn.set_tooltip_text(_("Choose log folder"))
+        browse_btn.connect('clicked', self.on_session_log_browse)
+        self.session_log_folder_row.add_suffix(browse_btn)
+        self.session_log_folder_row.connect('changed', self.on_session_log_text_changed, 'folder')
+        group.add(self.session_log_folder_row)
+
+        self.session_log_pattern_row = Adw.EntryRow(title=_("File name pattern"))
+        self.session_log_pattern_row.set_text(
+            str(self.config.get_setting('terminal.session_log_pattern', '') or SESSION_LOG_DEFAULT_PATTERN)
+        )
+        self.session_log_pattern_row.set_tooltip_text(
+            _("%S session name, %H host, %Y year, %M month, %D day, %h hour, "
+              "%m minute, %s second, %% a percent sign. A / or \\ starts a subfolder.")
+        )
+        self.session_log_pattern_row.connect('changed', self.on_session_log_text_changed, 'pattern')
+        group.add(self.session_log_pattern_row)
+
+        self.session_log_preview_row = Adw.ActionRow(title=_("Preview"))
+        self.session_log_preview_row.set_use_markup(False)  # paths may contain '&'
+        self.session_log_preview_row.set_subtitle_selectable(True)
+        group.add(self.session_log_preview_row)
+        self._update_session_log_preview()
+        terminal_page.add(group)
+
+    def _update_session_log_preview(self):
+        from datetime import datetime
+        from .platform_utils import get_data_dir
+
+        folder = self.session_log_folder_row.get_text().strip() or os.path.join(get_data_dir(), 'logs')
+        pattern = self.session_log_pattern_row.get_text().strip() or SESSION_LOG_DEFAULT_PATTERN
+        preview = resolve_log_path(folder, pattern, "my-server", "10.0.0.5", datetime.now())
+        if windows_path_on_posix(pattern) or windows_path_on_posix(folder):
+            preview += "\n" + _("Windows drive and network paths only work on Windows; here the file goes inside the log folder.")
+        self.session_log_preview_row.set_subtitle(preview)
+
+    def on_session_log_enabled_changed(self, row, _pspec):
+        try:
+            self.config.set_setting('terminal.session_log_enabled', bool(row.get_active()))
+        except Exception as exc:
+            logger.error("Failed to update session logging: %s", exc)
+
+    def on_session_log_text_changed(self, row, which):
+        try:
+            text = row.get_text().strip()
+            if which == 'pattern' and text == SESSION_LOG_DEFAULT_PATTERN:
+                text = ''
+            self.config.set_setting(f'terminal.session_log_{which}', text)
+            self._update_session_log_preview()
+        except Exception as exc:
+            logger.error("Failed to update session log %s: %s", which, exc)
+
+    def on_session_log_browse(self, _button):
+        """Folder chooser for the session log folder."""
+        try:
+            dialog = Gtk.FileDialog()
+            dialog.set_title(_("Choose log folder"))
+
+            def _picked(dlg, result):
+                try:
+                    folder = dlg.select_folder_finish(result)
+                    if folder is not None:
+                        self.session_log_folder_row.set_text(folder.get_path() or '')
+                except Exception:
+                    pass  # user cancelled / no selection
+
+            dialog.select_folder(self._dialog_parent(), None, _picked)
+        except Exception as exc:
+            logger.debug("session log browse failed: %s", exc)
+
     def _add_remote_clipboard_group(self, terminal_page):
         """OSC 52: let programs on the remote host write the local clipboard."""
         clipboard_group = Adw.PreferencesGroup(title=_("Remote Clipboard"))
@@ -1325,6 +1426,7 @@ class PreferencesWindow(Adw.Window):
         self._add_terminal_backend_group(terminal_page)
         self._add_terminal_input_groups(terminal_page)
         self._add_terminal_daemon_group(terminal_page)
+        self._add_session_log_group(terminal_page)
         self._add_terminal_preferred_group(terminal_page)
         return terminal_page
 
