@@ -790,6 +790,8 @@ class PreferencesWindow(Adw.Window):
         theme = normalize_theme(self.config.get_setting('terminal.highlight_theme', None))
         self.highlight_theme_row.set_selected(THEMES.index(theme))
         self.highlight_theme_row.connect('notify::selected', self.on_highlight_theme_changed)
+        # Only the SecureCRT-style profile has colour themes.
+        self.highlight_theme_row.set_sensitive(current == 'cisco-securecrt')
         group.add(self.highlight_theme_row)
 
         terminal_page.add(group)
@@ -801,6 +803,9 @@ class PreferencesWindow(Adw.Window):
         index = combo_row.get_selected()
         if 0 <= index < len(PROFILES):
             self.config.set_setting('terminal.highlight_profile', PROFILES[index])
+            theme_row = getattr(self, 'highlight_theme_row', None)
+            if theme_row is not None:
+                theme_row.set_sensitive(PROFILES[index] == 'cisco-securecrt')
 
     def on_highlight_theme_changed(self, combo_row, _param):
         index = combo_row.get_selected()

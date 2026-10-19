@@ -1289,6 +1289,21 @@ def test_theme_palettes_are_readable():
         assert _contrast(THEME_COLOURS["dark"][role], (0, 0, 0)) >= 4.5, role
 
 
+def test_profile_handler_greys_out_theme_for_legacy_profiles():
+    from sshpilot.preferences import PreferencesWindow
+
+    sensitive = []
+    prefs = PreferencesWindow.__new__(PreferencesWindow)
+    prefs.config = type("Config", (), {"set_setting": lambda *_args: None})()
+    prefs.highlight_theme_row = type(
+        "Row", (), {"set_sensitive": lambda _self, value: sensitive.append(value)}
+    )()
+    for index in (PROFILES.index("junos"), PROFILES.index("cisco-securecrt")):
+        combo = type("Combo", (), {"get_selected": lambda _self, i=index: i})()
+        PreferencesWindow.on_highlight_profile_changed(prefs, combo, None)
+    assert sensitive == [False, True]
+
+
 def test_compile_cache_ignores_theme_for_legacy_profiles():
     import sshpilot.terminal_highlight as highlight
 
