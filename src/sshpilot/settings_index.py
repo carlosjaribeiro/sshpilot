@@ -125,11 +125,11 @@ SETTINGS = (
     ),
     SettingEntry(
         "terminal", N_("Highlighting"), N_("Highlight Profile"),
-        N_("cisco;securecrt;junos;huawei"),
+        N_("cisco;securecrt;junos;huawei;custom;edit;duplicate;rules;regex"),
     ),
     SettingEntry(
         "terminal", N_("Highlighting"), N_("Highlight Colour Theme"),
-        N_("securecrt;dark;light;high contrast;terminal palette"),
+        N_("securecrt;dark;light;high contrast;terminal palette;custom;edit;duplicate"),
     ),
     SettingEntry("terminal", N_("Backend"), N_("Terminal Backend"), N_("vte;xterm.js")),
     SettingEntry("terminal", N_("Keyboard"), N_("Terminal Shortcut Pass-through")),
