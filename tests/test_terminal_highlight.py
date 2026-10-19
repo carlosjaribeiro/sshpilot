@@ -1258,7 +1258,7 @@ SCREENSHOT = (
     b"%LINEPROTO-5-UPDOWN: Line protocol on Interface GigabitEthernet0/3, "
     b"changed state to up\r\n"
     b"%SW_MATM-4-MACFLAP_NOTIF: Host ec8e.7717.60c9 in vlan 668 is flapping\r\n"
-    b"SW-PISO-2_01#"
+    b"SW-ACCESS-01#"
 )
 
 
@@ -1335,7 +1335,7 @@ def test_securecrt_golden_screenshot_colours_follow_the_rule_file():
         (b"%SW_MATM-4-MACFLAP_NOTIF:", SYSLOG), (b" ", None), (b"H", MISC),
         (b"ost ", None), (b"ec8e.7717.60c9", MAC), (b" in ", None), (b"vlan", MISC),
         (b" 668 is flapping\r\n", None),
-        (b"SW-PISO-2_01#", IFACE),
+        (b"SW-ACCESS-01#", IFACE),
     ]
 
 
@@ -1433,7 +1433,7 @@ def test_securecrt_unfinished_line_waits_for_idle_or_prompt():
     assert not h.pending and h.flush_due() == b""
     # The rest of the line is coloured with the shown part as context.
     assert h.feed(b"\x08\x08x\r\n") == b"\x08\x08x\r\n"
-    assert h.feed(b"SW-PISO-2_01#") == truecolour(b"SW-PISO-2_01#", IFACE)
+    assert h.feed(b"SW-ACCESS-01#") == truecolour(b"SW-ACCESS-01#", IFACE)
 
 
 def test_securecrt_held_line_survives_alt_screen_reset_and_disable():
