@@ -96,6 +96,8 @@ src/sshpilot/split_view.py
 src/sshpilot/ssh_connection_validator.py
 src/sshpilot/sshcopyid_window.py
 src/sshpilot/terminal.py
+src/sshpilot/terminal_highlight.py
+src/sshpilot/terminal_highlight_custom.py
 src/sshpilot/terminal_session_controller.py
 src/sshpilot/terminal_manager.py
 src/sshpilot/terminal_search.py
