@@ -909,7 +909,8 @@ def test_securecrt_adversarial_32k_is_bounded():
     data = (b"a" * 32767) + b"!"
     started = time.monotonic()
     out = run("cisco-securecrt", data)
-    assert time.monotonic() - started < 1.0
+    # Eight 4096-byte lines; the quadratic source rules cost ~0.25 s each.
+    assert time.monotonic() - started < 5.0
     assert strip(out) == data
 
 
@@ -1026,7 +1027,7 @@ def test_securecrt_repeated_triggers_are_linear(token):
     data = (token * (32 * 1024 // len(token) + 1))[:32 * 1024]
     started = time.monotonic()
     out = run("cisco-securecrt", data)
-    assert time.monotonic() - started < 0.5
+    assert time.monotonic() - started < 5.0  # eight 4096-byte lines, see above
     assert strip(out) == data
 
 
@@ -1389,19 +1390,71 @@ def test_securecrt_held_line_survives_alt_screen_reset_and_disable():
 
 
 def test_securecrt_line_cap_bounds_worst_case_cost():
-    from sshpilot.terminal_highlight import LINE_MAX
+    from sshpilot.terminal_highlight import DIGIT_RUN_MAX, LINE_MAX
 
-    for unit in (b"1", b"a", b"fail ", b"-more-", b"%-1-", b"1.(", b"\xc3\xa9"):
+    assert (LINE_MAX, DIGIT_RUN_MAX) == (4096, 256)
+    units = (b"1", b"1" * 256 + b"a", b"a", b"-more-", b"%-1-", b"1.(", b"\xc3\xa9")
+    for unit in units:
         h = Highlighter("cisco-securecrt")
-        data = (unit * (32 * 1024))[:32 * 1024]
+        data = (unit * (2 * LINE_MAX))[:2 * LINE_MAX]  # two full-length lines
         slowest, out = 0.0, []
         for offset in range(0, len(data), 4096):
             started = time.monotonic()
             out.append(h.feed(data[offset:offset + 4096]))
             slowest = max(slowest, time.monotonic() - started)
-        assert slowest < 0.5, unit
+        assert slowest < 2.0, unit  # measured worst: ~0.7 s for "%-1-"
         assert strip(b"".join(out) + h.flush()) == data
-        assert LINE_MAX == 256
+
+
+@pytest.mark.parametrize("length", [300, 4000])
+def test_securecrt_long_line_is_matched_whole(length):
+    line = b"x" * (length - 5) + b" down"
+    assert run("cisco-securecrt", line + b"\r\n") == truecolour(line, RED) + b"\r\n"
+
+
+def test_securecrt_line_over_the_cap_falls_back_to_pieces():
+    from sshpilot.terminal_highlight import LINE_MAX
+
+    # The cut piece is matched as its own line: ".*down.?" stops at the cut.
+    out = run("cisco-securecrt", b"x" * (LINE_MAX - 4) + b" down down\r\n")
+    assert _runs(out) == [
+        (b"x" * (LINE_MAX - 4) + b" dow", None), (b"n down", RED), (b"\r\n", None),
+    ]
+
+
+def test_securecrt_long_digit_run_is_matched_in_pieces():
+    from sshpilot.terminal_highlight import DIGIT_RUN_MAX
+
+    digits = b"1" * DIGIT_RUN_MAX
+    # Whole-line ".*down.?" would cover the digits; pieces keep the cost bounded.
+    out = run("cisco-securecrt", digits + b"1 down\r\n")
+    assert _runs(out) == [(digits, None), (b"1 down", RED), (b"\r\n", None)]
+    out = run("cisco-securecrt", digits + b" down\r\n")
+    assert _runs(out) == [(digits + b" down", RED), (b"\r\n", None)]
+
+
+def test_securecrt_fixture_rows_are_regex_and_colour_only():
+    """The file has no enable flag: every row is "regex",COLORREF.
+
+    The 51 non-``[*]`` rows are all in the profile; the final ".*" default
+    row is kept but emits nothing (documented deviation). ``[*]`` rows are
+    the list's section labels; as regexes they only match a literal ``*``
+    followed by the label, which never occurs in device output.
+    """
+    lines = [
+        line for line in FIXTURE.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    # Only one row carries more: a trailing "# V3: bold, ..." note, not a flag.
+    assert all(re.fullmatch(r' "[^"]+",[0-9a-f]{8}(?:\s+#.*)?', line) for line in lines)
+    rows = [next(csv.reader([line], skipinitialspace=True)) for line in lines]
+    labels = [row[0] for row in rows if row[0].startswith("[*]")]
+    assert len(labels) == len(rows) - 51 == 17
+    for label in labels:
+        assert re.search(label, SCREENSHOT.decode(), re.IGNORECASE) is None
+        assert re.fullmatch(label, "*" + label[3:])
+    assert SECURECRT_RULES[-1].source == ".*|setasregextosetdefaultcolor"
+    assert style_bytes(SECURECRT_RULES[-1].role, "securecrt") == (b"", b"")
 
 
 def test_paint_display_schedules_idle_flush_for_held_line(monkeypatch):

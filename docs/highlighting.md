@@ -72,11 +72,19 @@ still apply.
 ## SecureCRT line engine
 
 The profile holds each line of output until it ends, then applies every rule
-to the whole line, exactly as written in the file (only `re.IGNORECASE`), in
-file order, each rule painting all its matches over the earlier ones. Output
-is therefore the same however the stream is split into chunks, and every rule
-sees the whole line: `.*thernet…`, `.*down.?`, `.*-more-.*`, `snmp.*`, the `^`
-prompt rules and `$` all behave as in SecureCRT. Visible bytes never change.
+to the line, exactly as written in the file (only `re.IGNORECASE`), in file
+order, each rule painting all its matches over the earlier ones. Output is
+therefore the same however the stream is split into chunks. Every line of up
+to 4096 bytes is matched whole (the two exceptions are under **Line cap**), so
+`.*thernet…`, `.*down.?`, `.*-more-.*`, `snmp.*`, the `^` prompt rules and `$`
+behave as in SecureCRT. Visible bytes never change.
+
+Rule file format: each row is `"regex",COLORREF` (`00BBGGRR`); there is no
+enable/disable field. One row also carries a trailing `# V3: …` note, which is
+ignored. Rows whose regex starts with `[*]` are the list's 17 section labels
+(`[*]Interfaces`, …). They are not loaded: as regexes they only match a
+literal `*` followed by the label, which device output never contains. The
+other 51 rows are all loaded.
 
 - **Line end:** CR, LF or backspace (BS). Backspace counts because Cisco erases
   `--More--` with backspaces and prints the next line in its place.
@@ -86,11 +94,17 @@ prompt rules and `$` all behave as in SecureCRT. Visible bytes never change.
   line is coloured with the shown part as context; the shown part itself is
   never repainted, so a line-wide rule triggered later (`SW#copy x.bin`) only
   colours the new text. An unfinished UTF-8 character is held back.
-- **Line cap:** a line is cut every 256 bytes (at a UTF-8 boundary) and each
-  piece is matched on its own. Several source rules are quadratic (`.*X.*`)
-  and `\d*\d*\.\d*\(` is cubic on digit runs: 256 bytes keeps the worst case
-  near 7 ms per line (about 0.12 s per 4 KiB of pure digits); typical lines
-  cost about 0.2 ms.
+- **Line cap:** typical lines cost about 0.2 ms, but several source rules are
+  superlinear, so two fallbacks bound hostile input:
+  - a line longer than 4096 bytes is cut at 4096 (at a UTF-8 boundary) and
+    the pieces are matched as separate lines, so a rule cannot span the cut;
+  - a line containing a run of more than 256 digits is matched in 256-byte
+    pieces, because `\d*\d*\.\d*\(` is cubic in the run length (21 s for 4096
+    digits whole, about 7 ms per piece).
+
+  The worst case left is a hostile 4096-byte line: about 0.25 s for the
+  quadratic `.*X` rules, and about 0.7 s for `%.+-[0-9]-.+:` on `%-1-%-1-…`
+  with no `:`.
 - **Remote styling:** escape sequences keep their position in the line. Text
   the remote coloured (foreground/background, reverse, conceal) still counts
   for matching but is never painted; alternate-screen programs (vim, less,
@@ -100,6 +114,6 @@ Deliberate deviations from the file:
 
 | Source rule | Behaviour | Reason |
 |---|---|---|
-| Final `.*\|setasregextosetdefaultcolor` | Emits no SGR: the terminal's default colour is the baseline | Painting it last would grey over every earlier rule; the file names it the default-colour rule. |
+| Final `.*\|setasregextosetdefaultcolor` (`00808080`) | Loaded as the last rule but emits no SGR: the terminal's default colour is the baseline | The file has no enable flag to turn it off. Applied literally as the last, highest-priority rule, it would grey over every earlier rule; the file names it the default-colour rule. |
 | — | No word guards on short words | The earlier "no alphanumeric neighbour" rule for `no`, `on`, `des` … contradicts the file, so it was dropped. As in the file, `no` matches in `snooping`, `on` in `authentication`, and the single letters `H`, `V`, `Q` colour every `h`, `v`, `q`. |
 | V3 progress rule `\[#+(?:\x20\|$)\|^\](?:\x20\|$)` | Bold only for its span, then foreground/bold/faint restored | Prevents bold leaking into the rest of the line. |

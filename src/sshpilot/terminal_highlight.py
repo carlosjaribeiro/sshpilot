@@ -19,8 +19,10 @@ Streaming rules:
   colours it whole, so splits never change the result. An unfinished line
   (prompt, echo, ``--More--``) is shown by :meth:`Highlighter.flush_due`
   after ``FLUSH_DELAY`` idle seconds, or at once when it looks like a prompt;
-  its rest is coloured later with the shown part as context. Lines are cut at
-  ``LINE_MAX`` bytes to bound the cost of the unmodified source regexes.
+  its rest is coloured later with the shown part as context. A line longer
+  than ``LINE_MAX`` bytes is cut, and one with a run of more than
+  ``DIGIT_RUN_MAX`` digits is matched in pieces, to bound the cost of the
+  unmodified source regexes.
 * Text is left alone while the remote has set a foreground/background colour,
   reverse or conceal, and while any alternate-screen mode (47/1047/1049) is on.
 * A disabled highlighter returns its input unchanged but keeps tracking
@@ -240,9 +242,13 @@ _TAIL_RE = re.compile(rb"[^\x00-\x20\x7f]*\Z")  # trailing run of non-break byte
 _ALT_SCREEN_MODES = {b"47", b"1047", b"1049"}
 _CARRY_MAX = 64
 FLUSH_DELAY = 0.05  # seconds an unfinished SecureCRT line may wait
-# Long enough for any Cisco line; short enough that the worst source rule
-# (``\d*\d*\.``, cubic on a digit run) stays under ~7 ms per line.
-LINE_MAX = 256
+# Keeps any real Cisco line whole; the quadratic ``.*X`` source rules cost
+# about 0.25 s on a hostile 4096-byte line.
+LINE_MAX = 4096
+# ``\d*\d*\.\d*\(`` is cubic in a digit run (21 s for 4096 digits): a line
+# with a longer run is matched in pieces of this size (~7 ms each).
+DIGIT_RUN_MAX = 256
+_LONG_DIGIT_RUN = re.compile(rb"[0-9]{%d}" % (DIGIT_RUN_MAX + 1))
 _LINE_BREAK = re.compile(rb"[\r\n\x08]")
 _PROMPT = re.compile(r"\w[^>]*#|\w[^#]*>")
 _CTX_MAX = 16  # bytes of look-behind kept for _not_a_version across chunks
@@ -608,6 +614,10 @@ def _incomplete_utf8(data: bytes) -> int:
 
 def _byte_owners(line: bytes, rules: Tuple[CompiledRule, ...]) -> List[Optional[int]]:
     """Per-byte rule owners; the regexes see decoded characters."""
+    if _LONG_DIGIT_RUN.search(line):
+        step = DIGIT_RUN_MAX
+        return [owner for start in range(0, len(line), step)
+                for owner in _byte_owners(line[start:start + step], rules)]
     text = line.decode("utf-8", "surrogateescape")
     owners = line_owners(text, rules)
     if len(text) == len(line):
