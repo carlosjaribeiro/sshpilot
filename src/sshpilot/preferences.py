@@ -1089,7 +1089,7 @@ class PreferencesWindow(Adw.Window):
         self.session_log_pattern_row.connect('changed', self.on_session_log_text_changed, 'pattern')
         group.add(self.session_log_pattern_row)
 
-        self.session_log_preview_row = Adw.ActionRow(title=_("Preview"))
+        self.session_log_preview_row = Adw.ActionRow(title=_("Example: log file path"))
         self.session_log_preview_row.set_use_markup(False)  # paths may contain '&'
         self.session_log_preview_row.set_subtitle_selectable(True)
         group.add(self.session_log_preview_row)
@@ -1102,7 +1102,7 @@ class PreferencesWindow(Adw.Window):
 
         folder = self.session_log_folder_row.get_text().strip() or os.path.join(get_data_dir(), 'logs')
         pattern = self.session_log_pattern_row.get_text().strip() or SESSION_LOG_DEFAULT_PATTERN
-        preview = resolve_log_path(folder, pattern, "my-server", "10.0.0.5", datetime.now())
+        preview = resolve_log_path(folder, pattern, "my-server", "192.0.2.10", datetime.now())
         if windows_path_on_posix(pattern) or windows_path_on_posix(folder):
             preview += "\n" + _("Windows drive and network paths only work on Windows; here the file goes inside the log folder.")
         self.session_log_preview_row.set_subtitle(preview)

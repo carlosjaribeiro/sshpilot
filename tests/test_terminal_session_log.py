@@ -17,7 +17,7 @@ from sshpilot.terminal_session_log import (
 )
 
 NOW = datetime(2026, 3, 9, 14, 7, 5)
-USER_PATTERN = r"C:\Users\carlos\OneDrive - VINCI Energies\Documentos\Logs\%Y-%M-%D\%S (%H) -%Y-%M-%D- %h-%m.log"
+USER_PATTERN = r"C:\Users\user\Documents\Logs\%Y-%M-%D\%S (%H) -%Y-%M-%D- %h-%m.log"
 
 
 def test_placeholders_month_is_M_and_minute_is_m():
@@ -55,13 +55,13 @@ def test_default_pattern_makes_per_day_subfolder_posix():
 def test_user_pattern_as_one_absolute_windows_path():
     path = resolve_log_path("", USER_PATTERN, "srv", "h1", NOW, windows=True)
     assert path == (
-        "C:\\Users\\carlos\\OneDrive - VINCI Energies\\Documentos\\Logs\\2026-03-09"
+        "C:\\Users\\user\\Documents\\Logs\\2026-03-09"
         "\\srv (h1) -2026-03-09- 14-07.log"
     )
 
 
 def test_user_pattern_split_into_folder_and_relative_pattern_windows():
-    folder = r"C:\Users\carlos\OneDrive - VINCI Energies\Documentos\Logs"
+    folder = r"C:\Users\user\Documents\Logs"
     relative = r"%Y-%M-%D\%S (%H) -%Y-%M-%D- %h-%m.log"
     full = resolve_log_path("", USER_PATTERN, "srv", "h1", NOW, windows=True)
     assert resolve_log_path(folder, relative, "srv", "h1", NOW, windows=True) == full
