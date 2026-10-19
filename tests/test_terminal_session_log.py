@@ -309,7 +309,8 @@ def test_windows_drive_pattern_on_posix_is_flagged():
 
 @pytest.fixture(autouse=True)
 def _fresh_run_registry():
-    tsl._used_paths.clear()
+    # getattr: also usable against commits that predate the registry.
+    getattr(tsl, "_used_paths", {}).clear()
 
 
 @pytest.mark.parametrize("nickname", ["~", "~/x", "$HOME", "${HOME}", "%S", "%%", "..", "~root"])
@@ -399,3 +400,51 @@ def test_truncated_utf8_at_close_is_written_not_lost(tmp_path):
     log.write("é".encode()[:1])
     log.close()
     assert path.read_text(encoding="utf-8") == "\ufffd"
+
+
+@pytest.mark.parametrize("pattern", ["//server/share/%S.log", "\\\\server\\share\\%S.log", "/\\server/share/%S.log", "///x/%S.log"])
+def test_double_leading_separator_is_unc_and_stays_inside_folder_on_posix(pattern):
+    path = resolve_log_path("/logs", pattern, "s", "h", NOW, windows=False)
+    assert posixpath.commonpath([posixpath.normpath(path), "/logs"]) == "/logs", path
+    assert windows_path_on_posix(pattern, windows=False)
+
+
+def test_single_leading_slash_stays_an_explicit_absolute_override():
+    assert resolve_log_path("/logs", "/var/log/%S.log", "s", "h", NOW, windows=False) == "/var/log/s.log"
+    assert not windows_path_on_posix("/var/log/%S.log", windows=False)
+
+
+@pytest.mark.parametrize("pattern", ["//server/share/%S.log", "\\\\server\\share\\%S.log"])
+def test_double_leading_separator_is_a_real_unc_override_on_windows(pattern):
+    assert resolve_log_path("C:\\logs", pattern, "s", "h", NOW, windows=True) == "\\\\server\\share\\s.log"
+    assert not windows_path_on_posix(pattern, windows=True)
+
+
+def test_trailing_dots_and_spaces_are_trimmed_per_component_on_windows():
+    path = resolve_log_path("C:\\logs", "dir. /sub .\\%S.log. ", "s", "h", NOW, windows=True)
+    assert path == "C:\\logs\\dir\\sub\\s.log"
+    # POSIX keeps the names as written
+    assert resolve_log_path("/logs", "dir. /%S.log", "s", "h", NOW, windows=False) == "/logs/dir. /s.log"
+
+
+def test_path_key_treats_windows_trailing_dot_space_aliases_as_one_file():
+    assert tsl._path_key("a/b. ", windows=True) == tsl._path_key("a/b", windows=True)
+    assert tsl._path_key("a/b. ", windows=False) != tsl._path_key("a/b", windows=False)
+
+
+def test_used_path_registry_is_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr(tsl, "_USED_PATHS_MAX", 3)
+    for n in range(10):
+        log = SessionLogger(str(tmp_path), f"f{n}.log")
+        log.start("s", "h", NOW)
+        log.close()
+    assert len(tsl._used_paths) == 3
+
+
+def test_a_used_path_whose_file_was_deleted_is_reused(tmp_path):
+    log = SessionLogger(str(tmp_path), "s.log")
+    first = log.start("s", "h", NOW)
+    log.close()
+    Path(first).unlink()
+    assert log.start("s", "h", NOW) == first
+    log.close()

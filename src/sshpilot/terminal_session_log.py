@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import time
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Callable, Optional
@@ -34,7 +35,10 @@ DEFAULT_PATTERN = "%Y-%M-%D/%S (%H) -%Y-%M-%D- %h-%m.log"
 # Also inert for any later ~/$/% expansion: a nickname must never become a path.
 _ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f\x7f$%{}]')
 _RESERVED = re.compile(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$", re.IGNORECASE)
-_WINDOWS_ABS = re.compile(r"^([A-Za-z]:[\\/]|\\\\)")
+# Drive letter, or a leading double separator (Windows UNC, either slash).
+_WINDOWS_ABS = re.compile(r"^([A-Za-z]:[\\/]|[\\/]{2})")
+# Trailing dots/spaces of a path component, which Windows silently drops.
+_TRAILING = re.compile(r"(?<=[^\\/ .])[ .]+(?=[\\/]|$)")
 # A ".." path component (Windows also drops trailing dots/spaces, so "../"
 # and ".. \\" mean the same thing).
 _DRIVE_RELATIVE = re.compile(r"^([A-Za-z]):(?![\\/])")
@@ -107,8 +111,10 @@ def resolve_log_path(
 ) -> str:
     """Resolve folder + pattern to the file path for a session starting *now*.
 
-    An absolute pattern (POSIX ``/`` on POSIX; drive letter or UNC on Windows)
-    ignores *folder*. Everything else stays inside it: on Windows a rooted
+    An absolute pattern (a single leading ``/`` on POSIX; drive letter or UNC
+    on Windows) ignores *folder*. A leading ``//`` or ``\\\\`` is a UNC path:
+    real on Windows, but on POSIX it is placed inside *folder* like a drive
+    path, never silently treated as absolute. Everything else stays inside it: on Windows a rooted
     ``\\foo`` or drive-relative ``C:foo`` pattern is made relative, and on
     POSIX a Windows drive/UNC pattern is placed inside the folder. Both ``/``
     and ``\\`` separate directories, so a Windows style pattern also works on
@@ -122,9 +128,9 @@ def resolve_log_path(
     if windows:
         if _DRIVE_RELATIVE.match(expanded):
             expanded = _DRIVE_RELATIVE.sub(r"\1_", expanded)
-        elif expanded[:1] in ("/", "\\") and expanded[:2] not in ("\\\\", "//"):
+        elif expanded[:1] in ("/", "\\") and not _WINDOWS_ABS.match(expanded):
             expanded = expanded.lstrip("/\\")
-        return str(PureWindowsPath(folder, expanded))
+        return str(PureWindowsPath(folder, _TRAILING.sub("", expanded)))
     if _WINDOWS_ABS.match(expanded):
         expanded = re.sub(r"^([A-Za-z]):", r"\1_", expanded).lstrip("/\\")
     return str(PurePosixPath(folder, expanded.replace("\\", "/")))
@@ -210,20 +216,39 @@ _IDLE_FLUSH_MS = 500
 # of them (same-minute reconnect, a second tab with the same pattern, or a
 # pattern with no time in it) gets a "-2" suffix instead of sharing the file.
 # A file left by an earlier run is still appended to.
-_used_paths: set = set()
+# Bounded: the oldest entries drop out, and a file that no longer exists is
+# free to reuse.
+_USED_PATHS_MAX = 4096
+_used_paths: "OrderedDict[str, None]" = OrderedDict()
 
 
-def _path_key(path: str) -> str:
-    return os.path.normcase(os.path.abspath(path))
+def _path_key(path: str, windows: Optional[bool] = None) -> str:
+    key = os.path.normcase(os.path.abspath(path))
+    if os.name == "nt" if windows is None else windows:
+        key = _TRAILING.sub("", key)  # "a. " and "a" are one file on Windows
+    return key
 
 
 def _free_path(path: str) -> str:
     root, ext = os.path.splitext(path)
     candidate, n = path, 2
-    while _path_key(candidate) in _used_paths:
+    while True:
+        key = _path_key(candidate)
+        if key not in _used_paths:
+            return candidate
+        if not os.path.exists(candidate):
+            del _used_paths[key]
+            return candidate
         candidate = f"{root}-{n}{ext}"
         n += 1
-    return candidate
+
+
+def _remember_path(path: str) -> None:
+    key = _path_key(path)
+    _used_paths[key] = None
+    _used_paths.move_to_end(key)
+    while len(_used_paths) > _USED_PATHS_MAX:
+        _used_paths.popitem(last=False)
 
 
 class SessionLogger:
@@ -276,7 +301,7 @@ class SessionLogger:
             self._fail(exc)
             return None
         self.path = path
-        _used_paths.add(_path_key(path))
+        _remember_path(path)
         self._last_flush = time.monotonic()
         return path
 

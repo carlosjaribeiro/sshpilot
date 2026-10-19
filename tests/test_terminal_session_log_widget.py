@@ -9,6 +9,13 @@ import sshpilot.terminal as terminal_module
 from sshpilot.terminal import TerminalWidget
 
 
+@pytest.fixture(autouse=True)
+def _fresh_run_registry():
+    from sshpilot import terminal_session_log as tsl
+
+    getattr(tsl, "_used_paths", {}).clear()
+
+
 class _Config:
     def __init__(self, **values):
         self.values = {f"terminal.{k}": v for k, v in values.items()}
@@ -169,9 +176,6 @@ def test_daemon_backend_uninstall_closes_the_handle(tmp_path):
 def test_same_minute_reconnect_through_the_widget_gets_a_suffixed_file(tmp_path, monkeypatch):
     from datetime import datetime
 
-    from sshpilot import terminal_session_log as tsl
-
-    tsl._used_paths.clear()
     monkeypatch.setattr("sshpilot.terminal_session_log.datetime", _FakeDatetime)
     _FakeDatetime.current = datetime(2026, 1, 1, 9, 0, 0)
     config = _Config(session_log_enabled=True, session_log_folder=str(tmp_path))  # default pattern
