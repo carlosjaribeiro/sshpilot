@@ -79,12 +79,32 @@ to 4096 bytes is matched whole (the two exceptions are under **Line cap**), so
 `.*thernet…`, `.*down.?`, `.*-more-.*`, `snmp.*`, the `^` prompt rules and `$`
 behave as in SecureCRT. Visible bytes never change.
 
-Rule file format: each row is `"regex",COLORREF` (`00BBGGRR`); there is no
-enable/disable field. One row also carries a trailing `# V3: …` note, which is
-ignored. Rows whose regex starts with `[*]` are the list's 17 section labels
-(`[*]Interfaces`, …). They are not loaded: as regexes they only match a
-literal `*` followed by the label, which device output never contains. The
-other 51 rows are all loaded.
+Rule file format. The reference is the user's original SecureCRT export
+(`tests/data/securecrt-cisco-words.original.ini`), which holds two lists of 71
+rows: legacy `Keyword List V2` (`"regex",COLORREF,flag`) and `Keyword List V3`
+(`"regex",COLORREF,F1,F2`). **V3 is the source of truth**; the importer
+(`load_rules`) reads only the V3 section when a file has one. `COLORREF` is
+`00BBGGRR`. Decoded fields:
+
+| Field | Meaning | Confidence |
+|---|---|---|
+| F1 bit 0 (`0x1`) | Rule enabled; `0` = disabled. Only the final default-colour row has it clear (also `0` in V2). | High (same flag as V2) |
+| F1 bit 3 (`0x8`) | Bold for the rule's matches. | Medium-low: inferred, VanDyke does not document V3 |
+| F2 | Not interpreted. `1` on every row except the progress row (`0xf`, i.e. four bits set), which also has F1 `0x9`. Probably an attribute mask. | Low |
+
+VanDyke documents bold/reverse/colour only as *session-wide* options
+(`Highlight Color`, `Highlight Bold`, `Highlight Reverse Video`). Whether the
+bold seen on other keywords in SecureCRT comes from `Highlight Bold` cannot be
+told from the file: its only per-rule bold row is the progress bar, so every
+other keyword's bold, if any, is the global option and not stored per rule.
+
+V2 vs V3 in this file: only the progress rule changes (colour `0000d9d9` ->
+`00ff0000` and F1 `0x1` -> `0x9`); the final row is disabled in both. The
+profile follows V3. Rows whose regex starts with `[*]` are the 20 section
+labels (`[*]Interfaces`, …). They are not loaded: as regexes they only match a
+literal `*` followed by the label, which device output never contains. Of the
+other 51 rows, 50 are enabled and loaded; the disabled final
+`.*|setasregextosetdefaultcolor` is kept as a no-op (see below).
 
 - **Line end:** CR, LF or backspace (BS). Backspace counts because Cisco erases
   `--More--` with backspaces and prints the next line in its place.
@@ -114,6 +134,6 @@ Deliberate deviations from the file:
 
 | Source rule | Behaviour | Reason |
 |---|---|---|
-| Final `.*\|setasregextosetdefaultcolor` (`00808080`) | Loaded as the last rule but emits no SGR: the terminal's default colour is the baseline | The file has no enable flag to turn it off. Applied literally as the last, highest-priority rule, it would grey over every earlier rule; the file names it the default-colour rule. |
+| Final `.*\|setasregextosetdefaultcolor` (`00808080`) | Kept in the built-in profile as the last rule but emits no SGR; the importer skips it (F1 = 0, disabled) | The terminal's default colour is the baseline. Applied literally as the last, highest-priority rule, it would grey over every earlier rule; the file names it the default-colour rule. |
 | — | No word guards on short words | The earlier "no alphanumeric neighbour" rule for `no`, `on`, `des` … contradicts the file, so it was dropped. As in the file, `no` matches in `snooping`, `on` in `authentication`, and the single letters `H`, `V`, `Q` colour every `h`, `v`, `q`. |
-| V3 progress rule `\[#+(?:\x20\|$)\|^\](?:\x20\|$)` | Bold only for its span, then foreground/bold/faint restored | Prevents bold leaking into the rest of the line. |
+| V3 progress rule `\[#+(?:\x20\|$)\|^\](?:\x20\|$)` (F1 `0x9`) | Bold (SGR 1, closed with `22;39`) only for its span, then foreground/bold/faint restored | Prevents bold leaking into the rest of the line. |

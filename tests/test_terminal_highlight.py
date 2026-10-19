@@ -847,14 +847,7 @@ def truecolour(text, rgb, *, bold=False):
 
 
 def test_securecrt_fixture_maps_every_non_comment_rule_in_order():
-    fixture = Path(__file__).with_name("data") / "securecrt-cisco-words.txt"
-    source = []
-    for line in fixture.read_text(encoding="utf-8").splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        pattern = next(csv.reader([line], skipinitialspace=True))[0]
-        if not pattern.startswith("[*]"):
-            source.append(pattern)
+    source = [row[0] for row in _v3_rows() if not row[0].startswith("[*]")]
     assert len(source) == 51
     assert [rule.source for rule in SECURECRT_RULES] == source
 
@@ -899,6 +892,38 @@ def test_securecrt_progress_v3_bold_is_scoped():
     assert out == truecolour(b"[### ", (0, 0, 255), bold=True) + b"tail"
 
 
+@pytest.mark.parametrize("theme", [t for t in THEMES if t != "terminal-palette"])
+def test_securecrt_bold_survives_every_theme(theme):
+    opening, closing = style_bytes("progress_active", theme, True)
+    assert opening.startswith(b"\x1b[1;") and closing == b"\x1b[22;39m"
+    h = Highlighter("cisco-securecrt", theme=theme)
+    assert h.feed(b"[### tail\r\n") == opening + b"[### " + closing + b"tail\r\n"
+
+
+def test_securecrt_bold_is_split_invariant():
+    data = b"x [### tail\r\n"
+    whole = run("cisco-securecrt", data)
+    assert b"\x1b[1;38;2;0;0;255m" in whole
+    for cut in range(len(data) + 1):
+        if data[:cut].endswith(b"#"):
+            continue  # a chunk ending in "#" looks like a prompt and is flushed early
+        assert run("cisco-securecrt", data[:cut], data[cut:]) == whole, cut
+
+
+def test_securecrt_importer_uses_v3_flags_and_ignores_v2(tmp_path):
+    path = tmp_path / "highlight_rules.ini"
+    path.write_text(
+        'D:"Match Case"=00000000\n'
+        'Z:"Keyword List V2"=00000003\n "abc",0000d9d9,00000001\n'
+        'Z:"Keyword List V3"=00000003\n'
+        ' "abc",00ff0000,00000009,0000000f\n "off",000000ff,00000000,00000001\n'
+        ' "plain",000000ff,00000001,00000001\n',
+        encoding="utf-8",
+    )
+    assert [(r.source, r.role, r.bold) for r in load_rules(path)] == [
+        ("abc", "#0000ff", True), ("plain", "#ff0000", False)]
+
+
 def test_securecrt_does_not_clobber_remote_colour_or_bold():
     data = b"\x1b[31;1m8.8.8.8 no\x1b[0m 8.8.4.4"
     out = run("cisco-securecrt", data)
@@ -932,14 +957,15 @@ def test_custom_loader_simple_securecrt_and_bad_regex(tmp_path, caplog):
     assert "Skipping invalid highlight rule" in caplog.text
 
 
-def test_securecrt_importer_loads_entire_source_fixture():
-    fixture = Path(__file__).with_name("data") / "securecrt-cisco-words.txt"
-    imported = load_rules(fixture)
-    assert len(imported) == 51
-    assert [rule.source for rule in imported] == [rule.source for rule in SECURECRT_RULES]
+def test_securecrt_importer_loads_original_v3_list():
+    imported = load_rules(FIXTURE)
+    # 71 V3 rows - 20 "[*]" labels - 1 disabled (F1=0) default row; V2 is ignored.
+    assert len(imported) == 50
+    assert [rule.source for rule in imported] == [rule.source for rule in SECURECRT_RULES[:-1]]
     assert [style_bytes(rule.role, "securecrt", rule.bold) for rule in imported] == [
-        style_bytes(rule.role, "securecrt", rule.bold) for rule in SECURECRT_RULES
+        style_bytes(rule.role, "securecrt", rule.bold) for rule in SECURECRT_RULES[:-1]
     ]
+    assert [rule.source for rule in imported if rule.bold] == [PROGRESS]
 
 
 def test_custom_rules_are_discovered_from_config_dir(tmp_path, monkeypatch):
@@ -1214,7 +1240,8 @@ def test_compile_cache_ignores_theme_for_legacy_profiles():
 
 # --- SecureCRT faithful line engine (round 3) ---------------------------------
 
-FIXTURE = Path(__file__).with_name("data") / "securecrt-cisco-words.txt"
+FIXTURE = Path(__file__).with_name("data") / "securecrt-cisco-words.original.ini"
+PROGRESS = r"\[#+(?:\x20|$)|^\](?:\x20|$)"
 MISC, SERVICES, SYSLOG = (128, 0, 0), (140, 78, 165), (255, 128, 64)
 
 # The text of the user's side-by-side screenshots (SSH Pilot vs SecureCRT).
@@ -1235,16 +1262,22 @@ SCREENSHOT = (
 )
 
 
-def _fixture_rules():
-    """(regex, COLORREF) for every non-comment rule of the user's file."""
-    rules = []
+def _v3_rows(version="V3"):
+    """(regex, COLORREF, F1, F2 or None) rows of one list of the user's original file."""
+    rows, current = [], None
     for line in FIXTURE.read_text(encoding="utf-8").splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        row = next(csv.reader([line], skipinitialspace=True))
-        if not row[0].startswith("[*]"):
-            rules.append((row[0], row[1].split()[0]))
-    return rules
+        header = re.match(r'Z:"Keyword List (V\d)"=', line)
+        if header:
+            current = header.group(1)
+        elif current == version:
+            row = next(csv.reader([line], skipinitialspace=True))
+            rows.append((row[0], row[1], int(row[2], 16), int(row[3], 16) if len(row) > 3 else None))
+    return rows
+
+
+def _fixture_rules():
+    """(regex, COLORREF) for every non-label rule of the user's V3 list."""
+    return [(row[0], row[1]) for row in _v3_rows() if not row[0].startswith("[*]")]
 
 
 def _runs(data):
@@ -1307,7 +1340,6 @@ def test_securecrt_golden_screenshot_colours_follow_the_rule_file():
 
 
 def test_securecrt_every_file_colour_converts_bgr_to_rgb():
-    text = FIXTURE.read_text(encoding="utf-8")
     table = {
         "000000ff": (255, 0, 0), "00808080": (128, 128, 128), "00d26900": (0, 105, 210),
         "00808000": (0, 128, 128), "004080ff": (255, 128, 64), "00408000": (0, 128, 64),
@@ -1315,13 +1347,39 @@ def test_securecrt_every_file_colour_converts_bgr_to_rgb():
         "0036d700": (0, 215, 54), "00000080": (128, 0, 0), "00006400": (0, 100, 0),
         "00ff0000": (0, 0, 255), "00009f00": (0, 159, 0), "00a54e8c": (140, 78, 165),
     }
-    assert set(re.findall(r'",([0-9a-f]{8})', text)) == set(table)
+    assert {row[1] for row in _v3_rows()} == set(table)
     assert {value: colourref_to_rgb(value) for value in table} == table
     # Each built-in rule emits its own file colour (the final ".*" stays unstyled).
     for (pattern, value), rule in zip(_fixture_rules()[:-1], SECURECRT_RULES):
         opening, _ = style_bytes(rule.role, "securecrt", rule.bold)
         assert opening.endswith(b"38;2;%d;%d;%dm" % table[value]), pattern
     assert style_bytes(SECURECRT_RULES[-1].role, "securecrt") == (b"", b"")
+
+
+def test_securecrt_profile_matches_original_v3_row_by_row():
+    rows = _v3_rows()
+    assert len(rows) == 71 == len(_v3_rows("V2"))
+    labels = [row for row in rows if row[0].startswith("[*]")]
+    disabled = [row[0] for row in rows if not row[2] & 1]
+    assert len(labels) == 20  # excluded: section labels only match a literal "*label"
+    assert disabled == [".*|setasregextosetdefaultcolor"]  # kept, emits nothing
+    for label in labels:
+        assert re.search(label[0], SCREENSHOT.decode(), re.IGNORECASE) is None
+    body = [row for row in rows if not row[0].startswith("[*]")]
+    assert [rule.source for rule in SECURECRT_RULES] == [row[0] for row in body]
+    for (regex, colour, f1, f2), rule in zip(body, SECURECRT_RULES):
+        if f1 & 1:
+            opening, _ = style_bytes(rule.role, "securecrt", rule.bold)
+            assert opening.endswith(b"38;2;%d;%d;%dm" % colourref_to_rgb(colour)), regex
+        assert rule.bold == bool(f1 & 8), regex
+    # Every row but two has the default flags; those two are the V2->V3 changes.
+    assert {(row[0], row[2], row[3]) for row in rows if (row[2], row[3]) != (1, 1)} == {
+        (PROGRESS, 0x9, 0xF), (".*|setasregextosetdefaultcolor", 0, 1)}
+    v2 = {row[0]: row for row in _v3_rows("V2")}
+    # V2 vs V3: only the progress row changes colour (and gains bold).
+    assert [(row[0], v2[row[0]][1], row[1]) for row in rows if v2[row[0]][1] != row[1]] == [
+        (PROGRESS, "0000d9d9", "00ff0000")]
+    assert [row[0] for row in rows if v2[row[0]][2] != row[2]] == [PROGRESS]
 
 
 def test_securecrt_split_invariance():
@@ -1434,26 +1492,11 @@ def test_securecrt_long_digit_run_is_matched_in_pieces():
     assert _runs(out) == [(digits + b" down", RED), (b"\r\n", None)]
 
 
-def test_securecrt_fixture_rows_are_regex_and_colour_only():
-    """The file has no enable flag: every row is "regex",COLORREF.
-
-    The 51 non-``[*]`` rows are all in the profile; the final ".*" default
-    row is kept but emits nothing (documented deviation). ``[*]`` rows are
-    the list's section labels; as regexes they only match a literal ``*``
-    followed by the label, which never occurs in device output.
-    """
-    lines = [
-        line for line in FIXTURE.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    ]
-    # Only one row carries more: a trailing "# V3: bold, ..." note, not a flag.
-    assert all(re.fullmatch(r' "[^"]+",[0-9a-f]{8}(?:\s+#.*)?', line) for line in lines)
-    rows = [next(csv.reader([line], skipinitialspace=True)) for line in lines]
-    labels = [row[0] for row in rows if row[0].startswith("[*]")]
-    assert len(labels) == len(rows) - 51 == 17
-    for label in labels:
-        assert re.search(label, SCREENSHOT.decode(), re.IGNORECASE) is None
-        assert re.fullmatch(label, "*" + label[3:])
+def test_securecrt_v3_flags_and_bold_rows():
+    """F1 bit 0 = enabled, bit 3 = bold; the progress row is the only bold one."""
+    rows = _v3_rows()
+    assert [row[0] for row in rows if row[2] & 8] == [PROGRESS]
+    assert [rule.source for rule in SECURECRT_RULES if rule.bold] == [PROGRESS]
     assert SECURECRT_RULES[-1].source == ".*|setasregextosetdefaultcolor"
     assert style_bytes(SECURECRT_RULES[-1].role, "securecrt") == (b"", b"")
 
