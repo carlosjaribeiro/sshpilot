@@ -7,6 +7,7 @@ pytest.importorskip("gi")
 
 import sshpilot.terminal as terminal_module
 from sshpilot.terminal import TerminalWidget
+from sshpilot.terminal_highlight import Highlighter
 
 
 @pytest.fixture(autouse=True)
@@ -115,6 +116,7 @@ def _bind_teardown(widget):
     widget._uninstall_selection_feed_pause = lambda: None
     widget.backend = None
     widget._mouse_tracking = None
+    widget._highlighter = Highlighter(enabled=False)
     widget._daemon_mode = False
     widget._daemon_controller = None
     widget.is_connected = False

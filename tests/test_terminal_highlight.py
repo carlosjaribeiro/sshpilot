@@ -622,6 +622,7 @@ def _lifecycle_widget(config=None):
         _highlighter=Highlighter("generic"),
         _mouse_tracking=None,
         config=config,
+        _stop_session_log=lambda: None,
     ), fed
 
 
