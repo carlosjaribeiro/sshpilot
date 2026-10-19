@@ -16,6 +16,7 @@ import logging
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
+from gettext import gettext as _
 from typing import Callable, Dict, List, Mapping, NamedTuple, Optional, Tuple, Union
 
 from .platform.paths import get_config_dir
@@ -261,7 +262,7 @@ def _safe_custom_pattern(pattern: str) -> str:
     32 times: ``*`` and ``+`` become ``{0,32}`` and ``{1,32}``.
     """
     if len(pattern) > 512:
-        raise ValueError("pattern exceeds 512 characters")
+        raise ValueError(_("The pattern is longer than 512 characters."))
     pattern.encode("ascii")
     parts: List[str] = []
     depth = quantified = pos = 0
@@ -269,30 +270,33 @@ def _safe_custom_pattern(pattern: str) -> str:
     while pos < len(pattern):
         match = _TOKEN.match(pattern, pos)
         if match is None:
-            raise ValueError(f"unsupported regex syntax at offset {pos}")
+            raise ValueError(_("Unsupported regex syntax at character {position}.").format(
+                position=pos + 1))
         kind, text = match.lastgroup, match.group()
         if kind == "quant":
             if previous != "atom":
-                raise ValueError("a quantifier must follow a single character or class")
+                raise ValueError(
+                    _("A quantifier (?, *, +, {n,m}) must follow a single character or class."))
             quantified += 1
             if quantified > 2:
-                raise ValueError("more than two quantifiers")
+                raise ValueError(_("At most two quantifiers are allowed."))
             if text.startswith("{"):
                 bounds = [int(number) for number in text[1:-1].split(",")]
                 if bounds[0] > bounds[-1] or bounds[-1] > _MAX_REPEAT:
-                    raise ValueError(f"repetition above {_MAX_REPEAT}")
+                    raise ValueError(
+                        _("Repetition above {count} is not allowed.").format(count=_MAX_REPEAT))
             text = {"*": f"{{0,{_MAX_REPEAT}}}", "+": f"{{1,{_MAX_REPEAT}}}"}.get(text, text)
         elif kind == "open":
             depth += 1
         elif kind == "close":
             depth -= 1
             if depth < 0:
-                raise ValueError("unbalanced parentheses")
+                raise ValueError(_("Unbalanced parentheses."))
         parts.append(text)
         previous = kind
         pos = match.end()
     if depth:
-        raise ValueError("unbalanced parentheses")
+        raise ValueError(_("Unbalanced parentheses."))
     result = "".join(parts)
     re.compile(result)
     return result

@@ -151,13 +151,13 @@ def test_name_collisions_are_rejected(config_dir):
     ("(a+)+$", "quantifier"),
     ("a{1,99}", "repetition above 32"),
     ("a{1,100000}", "unsupported"),
-    ("(?=x)", "quantifier must follow"),
+    ("(?=x)", "must follow a single"),
     ("[z-a]", "Invalid pattern"),
     ("é", "ASCII"),
     ("", "Enter a pattern"),
 ])
 def test_unsafe_or_invalid_regex_is_rejected_and_nothing_is_written(config_dir, pattern, message):
-    with pytest.raises(ValueError, match=f"Rule 2: .*{message}"):
+    with pytest.raises(ValueError, match=f"(?i)Rule 2: .*{message}"):
         save_profile(profile(EditableRule("ok", "ip"), EditableRule(pattern, "ip")))
     assert not (config_dir / STORE_FILE).exists()
 
@@ -334,7 +334,7 @@ def test_terminals_toast_a_fallback_once(config_dir, monkeypatch):
             self.title = title
 
         new = classmethod(lambda cls, title: cls(title))
-        set_timeout = get_title = lambda self, *_args: self.title
+        set_timeout = set_use_markup = get_title = lambda self, *_args: self.title
 
     monkeypatch.setattr(terminal.Adw, "Toast", Toast)
     monkeypatch.setattr(TerminalWidget, "_highlight_warning_shown", None)
@@ -358,3 +358,114 @@ def test_terminals_toast_a_fallback_once(config_dir, monkeypatch):
     config.values["terminal.highlight_profile"] = custom_id("Lab")  # broken again
     TerminalWidget._apply_highlight_settings(widgets[0])
     assert len(shown) == 2
+
+
+# --- review round 2 -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text", [
+    '{"version": 1, "themes": [{"name": "T", "base": "dark", "colours": {"ip": 123}}]}',
+    '{"version": 1, "themes": [{"name": "T", "base": "dark", "colours": {"ip": null}}]}',
+    '{"version": 1, "themes": [{"name": "T", "base": "dark", "colours": []}]}',
+    '{"version": 1, "themes": [{"name": "T", "base": 5}]}',
+    '{"version": 1, "themes": ["T"]}',
+    '{"version": 1, "profiles": [{"name": 5, "rules": []}]}',
+    '{"version": 1, "profiles": [{"name": "P", "rules": {}}]}',
+    '{"version": 1, "profiles": ["P"]}',
+    '{"version": 1, "profiles": [{"name": "P", "rules": [7]}]}',
+    '{"version": 1, "profiles": [{"name": "P", "rules": [{"pattern": "x", "colour": 1}]}]}',
+    '{"version": 1, "profiles": [{"name": "P", "rules": [{"pattern": "x", "colour": "ip",'
+    ' "bold": 1}]}]}',
+    '{"version": 1, "profiles": [{"name": "P", "rules": [{"pattern": "x", "colour": "ip",'
+    ' "description": []}]}]}',
+    '{"version": true}',
+    '{"version": 1, "profiles": null}',
+])
+def test_wrong_types_are_rejected_with_value_error_and_filter_falls_back(config_dir, text):
+    with pytest.raises(ValueError):
+        parse_store(text)
+    (config_dir / STORE_FILE).write_text(text)
+    h = Highlighter("junos", enabled=False)
+    apply_config(h, _Config(**{"terminal.highlight_profile": custom_id("P"),
+                               "terminal.highlight_theme": custom_id("T")}))
+    assert h.profile == "junos" and h.warning
+
+
+def test_description_length_is_enforced_at_save(config_dir):
+    with pytest.raises(ValueError, match="description is longer than 200"):
+        save_profile(profile(EditableRule("x", "ip", description="d" * 201)))
+    assert not (config_dir / STORE_FILE).exists()
+    save_profile(profile(EditableRule("x", "ip", description="  core  ")))
+    assert load_store().profiles["Lab"].rules[0].description == "core"
+
+
+def test_never_writes_a_file_the_loader_rejects(config_dir):
+    big = profile(*[EditableRule("x" * 500, "ip", description="d" * 200)] * 400)
+    with pytest.raises(ValueError, match="exceed 256 KiB"):
+        save_profile(big)
+    assert not (config_dir / STORE_FILE).exists()
+
+
+@pytest.mark.parametrize("name", ["generic", "Generic", "CISCO IOS", "cisco-securecrt",
+                                  "Cisco (SecureCRT-style)", "huawei vrp"])
+def test_custom_profile_names_avoid_builtins(config_dir, name):
+    with pytest.raises(ValueError, match="already used"):
+        save_profile(profile(name=name))
+
+
+@pytest.mark.parametrize("name", ["SecureCRT", "dark", "High Contrast", "terminal-palette"])
+def test_custom_theme_names_avoid_builtins(config_dir, name):
+    with pytest.raises(ValueError, match="already used"):
+        save_theme(CustomTheme(name, "dark"))
+
+
+def test_custom_rules_are_chunk_split_invariant():
+    lab = profile(EditableRule(r"\bcore\b", RED, bold=True), EditableRule(r"[0-9.]+", "ip"),
+                  EditableRule(r"^\w+#", GREEN), EditableRule("caf.", "bad"))
+    data = "SW1#show core 10.0.0.1 café\r\nlink core down 192.168.1.1\n".encode()
+    whole = feed(lab, data)
+    for size in (1, 2, 3, 5, 7):
+        h = Highlighter(lab)
+        parts = b"".join(h.feed(data[i:i + size]) for i in range(0, len(data), size))
+        assert parts + h.flush() == whole, size
+
+
+SECURECRT_SAMPLE = [
+    "GigabitEthernet0/1 is up, line protocol is up", "Hardware is Gigabit Ethernet",
+    "SW1#show ip interface brief", "unassigned", "  Internet address is 10.0.0.1/24",
+    "*Mar  1 00:01:02.123: %LINK-3-UPDOWN: Interface Gi0/1, changed state to down",
+    "access-list 101 permit tcp any host 10.0.0.5 eq 22 (hitcnt=0)",
+]
+
+
+def test_editable_securecrt_copy_paints_exactly_like_the_builtin(config_dir):
+    """Guard for the copy's rule order: duplicate, import and preview paths."""
+    from sshpilot.terminal_highlight_securecrt import load_rules
+
+    rules_file = config_dir / "highlight_rules.txt"
+    rules_file.write_text('"\\bGigabit\\b",#FF8800\n')
+    copy = profile(*profile_rules("cisco-securecrt"))
+    assert copy.rules[-1].pattern == r"\bGigabit\b"  # the file's rules come last
+    for line in SECURECRT_SAMPLE:
+        data = (line + "\n").encode()
+        builtin = feed("cisco-securecrt", data)
+        assert feed(copy, data) == builtin, line
+        # The preview paints the same characters with the same rules.
+        painted = b"".join(
+            (fg("#%02X%02X%02X" % colour, text.encode(), bold) if colour else text.encode())
+            for text, colour, bold in preview_runs(copy, "securecrt", line))
+        assert SGR.sub(b"", painted) == line.encode()
+        assert re.findall(rb"38;2;[0-9;]+m", painted) == re.findall(rb"38;2;[0-9;]+m", builtin)
+    # Import (as the editor does it) appends in file order, after the built-ins.
+    imported = [EditableRule(rule.source, rule.role, rule.bold, match_case=rule.match_case)
+                for rule in load_rules(rules_file)]
+    assert list(copy.rules[-len(imported):]) == imported
+
+
+def test_preview_skips_an_invalid_disabled_rule_but_saving_still_rejects_it(config_dir):
+    """The editor previews with invalid rules switched off."""
+    lab = profile(EditableRule("core", RED), EditableRule("(a+)+$", "ip", enabled=False))
+    assert preview_runs(lab, "securecrt", "core")[0][1] == (255, 0, 0)
+    assert feed(lab, b"core\n") == fg(RED, b"core") + b"\n"
+    with pytest.raises(ValueError, match="Rule 2"):
+        save_profile(lab)

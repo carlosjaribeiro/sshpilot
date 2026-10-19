@@ -48,6 +48,7 @@ from .terminal_highlight_custom import (
     CustomTheme,
     EditableRule,
     Store,
+    MAX_DESCRIPTION_LENGTH,
     check_colour,
     custom_name,
     hex_to_rgb,
@@ -270,6 +271,9 @@ def profile_rules(profile: str) -> List[EditableRule]:
 def check_rule(rule: EditableRule) -> Tuple[str, Optional[Validator]]:
     """The pattern to compile and its check; ValueError with a message to show."""
     check_colour(rule.colour)
+    if len(rule.description) > MAX_DESCRIPTION_LENGTH:
+        raise ValueError(_("The description is longer than {count} characters.").format(
+            count=MAX_DESCRIPTION_LENGTH))
     if rule.pattern in _TRUSTED:
         return rule.pattern, _TRUSTED[rule.pattern]
     if not rule.pattern:
@@ -282,22 +286,29 @@ def check_rule(rule: EditableRule) -> Tuple[str, Optional[Validator]]:
         raise ValueError(_("Invalid pattern: {error}").format(error=exc)) from None
 
 
+def _numbered(number: int, rule: EditableRule) -> Tuple[str, Optional[Validator]]:
+    try:
+        return check_rule(rule)
+    except ValueError as exc:
+        raise ValueError(_("Rule {number}: {error}").format(number=number, error=exc)) from None
+
+
 def check_profile(profile: CustomProfile) -> None:
     """Raise ValueError naming the first rule a profile cannot use."""
     for number, rule in enumerate(profile.rules, 1):
-        try:
-            check_rule(rule)
-        except ValueError as exc:
-            raise ValueError(_("Rule {number}: {error}").format(number=number, error=exc)) from None
+        _numbered(number, rule)
 
 
 def _compile_custom(profile: CustomProfile, theme: ThemeRef) -> Tuple[CompiledRule, ...]:
-    check_profile(profile)
+    """Compile the enabled rules; ValueError names the first unusable one.
+
+    Disabled rules never run, so only saving (check_profile) checks them.
+    """
     colours = theme_colours(theme)
     compiled = []
-    for rule in profile.rules:
+    for number, rule in enumerate(profile.rules, 1):
         if rule.enabled:
-            pattern, validate = check_rule(rule)
+            pattern, validate = _numbered(number, rule)
             opening, closing = style_bytes(rule.colour, colours, rule.bold)
             flags = 0 if rule.match_case else re.IGNORECASE
             compiled.append(CompiledRule(re.compile(pattern, flags), opening, closing,
@@ -305,30 +316,40 @@ def _compile_custom(profile: CustomProfile, theme: ThemeRef) -> Tuple[CompiledRu
     return tuple(compiled)
 
 
-def preview_runs(profile: CustomProfile, theme: ThemeRef,
-                 line: str) -> List[Tuple[str, Colour, bool]]:
-    """(text, colour, bold) runs of one line as the line engine paints it.
+Run = Tuple[str, Colour, bool]
+
+
+def preview_lines(profile: CustomProfile, theme: ThemeRef,
+                  lines: List[str]) -> List[List[Run]]:
+    """(text, colour, bold) runs of each line as the line engine paints it.
 
     The colour is ``None`` for unstyled text, else an RGB tuple or a palette
-    SGR code (``terminal-palette`` theme).
+    SGR code (``terminal-palette`` theme). The profile is compiled once.
     """
-    line = line[:LINE_MAX]
     enabled = [rule for rule in profile.rules if rule.enabled]
     colours = theme_colours(theme)
-    owners = line_owners(line, _compile_custom(profile, theme))
-    runs = []
-    pos = 0
-    for owner, group in itertools.groupby(owners):
-        end = pos + sum(1 for _owner in group)
-        if owner is None:
-            runs.append((line[pos:end], None, False))
-        else:
-            rule = enabled[owner]
-            colour = (hex_to_rgb(rule.colour) if rule.colour.startswith("#")
-                      else colours.get(rule.colour))
-            runs.append((line[pos:end], colour, rule.bold))
-        pos = end
-    return runs
+    compiled = _compile_custom(profile, theme)
+    result = []
+    for line in lines:
+        line = line[:LINE_MAX]
+        runs: List[Run] = []
+        pos = 0
+        for owner, group in itertools.groupby(line_owners(line, compiled)):
+            end = pos + sum(1 for _owner in group)
+            if owner is None:
+                runs.append((line[pos:end], None, False))
+            else:
+                rule = enabled[owner]
+                colour = (hex_to_rgb(rule.colour) if rule.colour.startswith("#")
+                          else colours.get(rule.colour))
+                runs.append((line[pos:end], colour, rule.bold))
+            pos = end
+        result.append(runs)
+    return result
+
+
+def preview_runs(profile: CustomProfile, theme: ThemeRef, line: str) -> List[Run]:
+    return preview_lines(profile, theme, [line])[0]
 
 
 def _compile(profile: ProfileRef, theme: ThemeRef) -> _Compiled:

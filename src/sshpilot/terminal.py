@@ -5347,6 +5347,7 @@ class TerminalWidget(Gtk.Box):
                 if TerminalWidget._highlight_warning_shown != warning:
                     try:
                         toast = Adw.Toast.new(warning)
+                        toast.set_use_markup(False)  # names and paths are not markup
                         toast.set_timeout(6)
                     except Exception:
                         return False
