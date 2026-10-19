@@ -13,8 +13,14 @@ Streaming rules:
   OSC ends at BEL or ST, the others at ST only. C1 controls are recognised in
   their UTF-8 form (``C2 9B`` ...), never as raw 8-bit bytes, which are UTF-8
   continuation bytes.
-* Text is never held back. A token split across chunks is coloured from the
-  chunk boundary on (the already-shown part stays as it was).
+* Legacy profiles never hold text back: a token split across chunks is
+  coloured from the chunk boundary on (the already-shown part stays as it was).
+* The SecureCRT profile holds each line until its CR, LF or backspace, then
+  colours it whole, so splits never change the result. An unfinished line
+  (prompt, echo, ``--More--``) is shown by :meth:`Highlighter.flush_due`
+  after ``FLUSH_DELAY`` idle seconds, or at once when it looks like a prompt;
+  its rest is coloured later with the shown part as context. Lines are cut at
+  ``LINE_MAX`` bytes to bound the cost of the unmodified source regexes.
 * Text is left alone while the remote has set a foreground/background colour,
   reverse or conceal, and while any alternate-screen mode (47/1047/1049) is on.
 * A disabled highlighter returns its input unchanged but keeps tracking
@@ -26,14 +32,16 @@ This module is pure Python and does not import ``gi``.
 from __future__ import annotations
 
 import ipaddress
+import itertools
 import re
+import time
 from typing import Callable, Dict, List, NamedTuple, Optional, Set, Tuple
 
 from .terminal_highlight_securecrt import (
     CompiledRule,
     THEMES as THEMES,
     compile_rules,
-    highlight_priority,
+    line_owners,
     normalize_theme,
 )
 
@@ -231,6 +239,12 @@ _ST_END_RE = re.compile(rb"\x1b\\|\xc2\x9c|[\x18\x1a]|\x1b(?!\\|\Z)")
 _TAIL_RE = re.compile(rb"[^\x00-\x20\x7f]*\Z")  # trailing run of non-break bytes
 _ALT_SCREEN_MODES = {b"47", b"1047", b"1049"}
 _CARRY_MAX = 64
+FLUSH_DELAY = 0.05  # seconds an unfinished SecureCRT line may wait
+# Long enough for any Cisco line; short enough that the worst source rule
+# (``\d*\d*\.``, cubic on a digit run) stays under ~7 ms per line.
+LINE_MAX = 256
+_LINE_BREAK = re.compile(rb"[\r\n\x08]")
+_PROMPT = re.compile(r"\w[^>]*#|\w[^#]*>")
 _CTX_MAX = 16  # bytes of look-behind kept for _not_a_version across chunks
 
 
@@ -242,8 +256,11 @@ class Highlighter:
     """Stateful stream rewriter; one instance per terminal."""
 
     def __init__(self, profile: str = "generic", enabled: bool = True,
-                 theme: str = "securecrt") -> None:
+                 theme: str = "securecrt",
+                 clock: Callable[[], float] = time.monotonic) -> None:
         self.enabled = enabled
+        self._clock = clock
+        self._fed_at = 0.0
         self.theme = normalize_theme(theme)
         self.set_profile(profile)
         self.reset()
@@ -261,19 +278,21 @@ class Highlighter:
         """Apply settings without losing stream state.
 
         Returns bytes that were held back and must now be displayed unchanged
-        (non-empty only when switching off mid-escape).
+        (non-empty only when switching off mid-escape, or when a change drops
+        a held SecureCRT line).
         """
-        old_style = self.profile, self.theme
+        old = self.enabled, self.profile, self.theme
         self.set_profile(profile, theme)
-        if old_style != (self.profile, self.theme):
-            self._line_rule = None
         flushed = b""
+        if old != (enabled, self.profile, self.theme):
+            # A held line goes out as it is: its rules or the switch are gone.
+            flushed, self._segs, self._prefix, self._line_len = (
+                b"".join(data for data, _, _ in self._segs), [], b"", 0)
         if self.enabled != enabled:
             self._carry = self._ctx = b""
-            self._line_rule = None
             # The held bytes are on screen after this call either way; keep them
             # for parsing (the rest of the sequence may follow) but never re-emit.
-            flushed = self._hold[self._shown:] if self.enabled else b""
+            flushed += self._hold[self._shown:] if self.enabled else b""
             self._shown = len(self._hold)
         self.enabled = enabled
         return flushed
@@ -286,19 +305,31 @@ class Highlighter:
         self._carry = b""
         self._ctx = b""  # plain text before the carry: lookbehind for validators
         self._shown = 0  # leading bytes of _hold already displayed
-        self._line_rule: Optional[Tuple[int, CompiledRule]] = None
-        # No text yet on the current line; and the same for the start of the
-        # carried context (the next window), for ``^`` rules.
-        self._at_line_start = self._ctx_at_line_start = True
+        # SecureCRT line buffer: (bytes, paint state or None, is text) pieces
+        # not yet shown, the already-shown start of the line, and its length.
+        self._segs: List[Tuple[bytes, Optional[Tuple[bool, bool]], bool]] = []
+        self._prefix = b""
+        self._line_len = 0
         self._reset_sgr()
 
     def _reset_sgr(self) -> None:
         self._fg = self._bg = self._reverse = self._conceal = False
         self._bold = self._faint = False
 
-    def _track_line_start(self, text: bytes) -> None:
-        if text:
-            self._at_line_start = not text[max(text.rfind(b"\r"), text.rfind(b"\n")) + 1:]
+    @property
+    def pending(self) -> bool:
+        """True while an unfinished SecureCRT line is held back."""
+        return bool(self._segs)
+
+    def flush_due(self) -> bytes:
+        """Show the unfinished line once the stream was idle for FLUSH_DELAY."""
+        if self._segs and self._clock() - self._fed_at >= FLUSH_DELAY:
+            return self.flush()
+        return b""
+
+    def flush(self) -> bytes:
+        """Show the unfinished line now, coloured as far as it has arrived."""
+        return self._emit_line(partial=True) if self._segs else b""
 
     def feed(self, data: bytes) -> bytes:
         if (
@@ -309,7 +340,6 @@ class Highlighter:
             and b"\xc2" not in data  # UTF-8 C1 controls
         ):
             self._carry = self._ctx = b""
-            self._track_line_start(data)
             return data  # nothing that changes tracked state: skip the scan
         shown, self._shown = self._shown, 0
         buf = self._hold + bytes(data)
@@ -338,7 +368,15 @@ class Highlighter:
             if nxt is None:
                 break
             self._carry = self._ctx = b""
+            before = len(out)
             i = self._escape(buf, i, out)
+            if self._segs and len(out) > before:  # keep it in line order
+                self._segs.append((out.pop(), None, False))
+                if self._alt_modes:
+                    out.append(self._emit_line(partial=False))
+        self._fed_at = self._clock()
+        if self._segs and _PROMPT.fullmatch(self._line_text().decode("utf-8", "replace")):
+            out.append(self.flush())
         if not self.enabled:
             self._shown = len(self._hold)  # disabled output shows everything
             return bytes(data)
@@ -363,6 +401,7 @@ class Highlighter:
                 m = _ESC_RE.match(buf, i)
                 if m is not None:
                     if m.group() == b"\x1bc":
+                        out.append(self.flush())
                         self.reset()
                 elif _PARTIAL_ESC_RE.match(buf, i):
                     self._hold = buf[i:]
@@ -426,9 +465,9 @@ class Highlighter:
                         next(it, None)
 
     def _text(self, text: bytes, last: bool) -> bytes:
+        if self.enabled and not self._alt_modes and self._compiled.priority_rules:
+            return self._line_text_feed(text)
         ctx, carry, self._ctx, self._carry = self._ctx, self._carry, b"", b""
-        line_start = self._ctx_at_line_start if ctx or carry else self._at_line_start
-        self._track_line_start(text)
         if (
             not self.enabled
             or self._alt_modes
@@ -437,19 +476,10 @@ class Highlighter:
             or self._reverse
             or self._conceal
         ):
-            if b"\n" in text or b"\r" in text:
-                self._line_rule = None
             return text
-        regex, colours, validators, priority_rules = self._compiled
+        regex, colours, validators, _ = self._compiled
         full = ctx + carry + text
         skip = len(ctx) + len(carry)
-        if priority_rules:
-            result, self._line_rule = highlight_priority(
-                full, skip, priority_rules, self._line_rule, self._bold, self._faint,
-                line_start,
-            )
-            self._remember_tail(full, last, line_start)
-            return result
         parts: List[bytes] = []
         pos = 0
         assert regex is not None
@@ -465,23 +495,126 @@ class Highlighter:
             parts.append(full[start:m.end()])
             parts.append(b"\x1b[39m")
             pos = m.end()
-        self._remember_tail(full, last, line_start)
+        self._remember_tail(full, last)
         if not parts:
             return text
         parts.append(full[max(pos, skip):])
         return b"".join(parts)
 
-    def _remember_tail(self, full: bytes, last: bool, line_start: bool) -> None:
+    def _remember_tail(self, full: bytes, last: bool) -> None:
         if last:
             tail = _TAIL_RE.search(full, max(0, len(full) - _CARRY_MAX - 1)).group()
             if len(tail) <= _CARRY_MAX:
                 self._carry = tail
                 keep = len(full) - len(tail)
-                begin = max(0, keep - _CTX_MAX)
-                self._ctx = full[begin:keep]
-                self._ctx_at_line_start = (
-                    full[begin - 1:begin] in (b"\r", b"\n") if begin else line_start
-                )
+                self._ctx = full[max(0, keep - _CTX_MAX):keep]
+
+    # --- SecureCRT profile: whole-line matching ----------------------------
+
+    def _line_text_feed(self, text: bytes) -> bytes:
+        out: List[bytes] = []
+        pos = 0
+        for brk in _LINE_BREAK.finditer(text):
+            self._add_text(text[pos:brk.start()], out)
+            out.append(self._emit_line(partial=False))
+            out.append(brk.group())
+            pos = brk.end()
+        self._add_text(text[pos:], out)
+        return b"".join(out)
+
+    def _add_text(self, data: bytes, out: List[bytes]) -> None:
+        while len(data) > LINE_MAX - self._line_len:
+            cut = LINE_MAX - self._line_len
+            while 0 < cut and 0x80 <= data[cut] < 0xC0:  # keep UTF-8 characters whole
+                cut -= 1
+            if not cut and not self._line_len:
+                cut = LINE_MAX
+            self._append_text(data[:cut])
+            out.append(self._emit_line(partial=False))
+            data = data[cut:]
+        self._append_text(data)
+
+    def _append_text(self, data: bytes) -> None:
+        if not data:
+            return
+        plain = not (self._fg or self._bg or self._reverse or self._conceal)
+        paint = (self._bold, self._faint) if plain else None
+        if self._segs and self._segs[-1][2] and self._segs[-1][1] == paint:
+            data = self._segs.pop()[0] + data
+        self._segs.append((data, paint, True))
+        self._line_len += len(data)
+
+    def _line_text(self) -> bytes:
+        return self._prefix + b"".join(data for data, _, is_text in self._segs if is_text)
+
+    def _emit_line(self, partial: bool) -> bytes:
+        """Colour the held part of the line using the whole line as context.
+
+        ``partial`` keeps the line open: what is shown now becomes context for
+        the rest, and an unfinished UTF-8 character stays held.
+        """
+        segs, keep = self._segs, []
+        if partial and segs and segs[-1][2]:
+            data, paint, _ = segs[-1]
+            tail = _incomplete_utf8(data)
+            if tail:
+                segs = segs[:-1] + ([(data[:-tail], paint, True)] if tail < len(data) else [])
+                keep = [(data[-tail:], paint, True)]
+        line = self._prefix + b"".join(data for data, _, is_text in segs if is_text)
+        owners = _byte_owners(line, self._compiled.priority_rules)[len(self._prefix):]
+        self._segs = keep
+        self._prefix = line if partial else b""
+        self._line_len = len(self._prefix) + sum(len(data) for data, _, _ in keep)
+        rules = self._compiled.priority_rules
+        parts: List[bytes] = []
+        pos = 0
+        for data, paint, is_text in segs:
+            if not is_text:
+                parts.append(data)
+                continue
+            seg_owners, pos = owners[pos:pos + len(data)], pos + len(data)
+            if paint is None:
+                parts.append(data)
+                continue
+            start = 0
+            # Adjacent rules with the same style form one run.
+            styles = (None if owner is None else rules[owner][1:] for owner in seg_owners)
+            for style, run in itertools.groupby(styles):
+                end = start + sum(1 for _ in run)
+                chunk, start = data[start:end], end
+                if style is None:
+                    parts.append(chunk)
+                    continue
+                opening, closing, bold = style
+                if bold and paint[0]:  # remote bold: add colour only
+                    opening, closing = opening.replace(b"[1;", b"[", 1), b"\x1b[39m"
+                elif bold and paint[1]:
+                    closing = b"\x1b[22;2;39m"  # 22 also ends the remote's faint: restore it
+                parts.extend((opening, chunk, closing))
+        return b"".join(parts)
+
+
+def _incomplete_utf8(data: bytes) -> int:
+    """Length of an unfinished UTF-8 character at the end of ``data``."""
+    for back in range(1, min(4, len(data)) + 1):
+        byte = data[-back]
+        if byte < 0x80:
+            return 0
+        if byte >= 0xC0:
+            need = 2 if byte < 0xE0 else 3 if byte < 0xF0 else 4
+            return back if back < need else 0
+    return 0
+
+
+def _byte_owners(line: bytes, rules: Tuple[CompiledRule, ...]) -> List[Optional[int]]:
+    """Per-byte rule owners; the regexes see decoded characters."""
+    text = line.decode("utf-8", "surrogateescape")
+    owners = line_owners(text, rules)
+    if len(text) == len(line):
+        return owners
+    return [owner for char, owner in zip(text, owners)
+            for _ in range(len(char.encode("utf-8", "surrogateescape")))]
+
 
 def apply_config(highlighter: Highlighter, config: object) -> bytes:
     """Sync ``highlighter`` with the terminal highlight settings.

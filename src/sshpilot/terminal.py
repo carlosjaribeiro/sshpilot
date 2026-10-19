@@ -48,7 +48,7 @@ WHEEL_SCROLL_LINES = DEFAULT_WHEEL_SCROLL_LINES
 # ssh_process_manager.py (GTK-free). Re-exported here so existing
 # `from .terminal import SSHProcessManager` / `process_manager` callers keep working.
 from .ssh_process_manager import SSHProcessManager, process_manager  # noqa: F401
-from .terminal_highlight import Highlighter, apply_config
+from .terminal_highlight import FLUSH_DELAY, Highlighter, apply_config
 from .terminal_search import TerminalSearch
 from .shortcut_utils import (
     accel_matches_latin_fallback,
@@ -1957,6 +1957,10 @@ class TerminalWidget(Gtk.Box):
                     list(after),
                 )
         backend.feed(self._highlighter.feed(data))
+        if self._highlighter.pending and getattr(self, "_highlight_timer_id", None) is None:
+            self._highlight_timer_id = GLib.timeout_add(
+                int(FLUSH_DELAY * 1000), self._on_highlight_flush
+            )
         if tracker is not None and self._needs_legacy_mouse_translation():
             # Settles on top of whatever the remote just set, so the emulator
             # ends up in SGR whenever the remote asked for a legacy mode.
@@ -5309,6 +5313,18 @@ class TerminalWidget(Gtk.Box):
         if obj is None:
             obj = self.__dict__["_highlighter_obj"] = Highlighter(enabled=False)
         return obj
+
+    def _on_highlight_flush(self) -> bool:
+        """Show a held unfinished line (prompt, echo) once output went idle."""
+        backend = getattr(self, "backend", None)
+        if not getattr(self, "_destroyed", False) and backend is not None:
+            held = self._highlighter.flush_due()
+            if held:
+                backend.feed(held)
+            if self._highlighter.pending:
+                return True
+        self._highlight_timer_id = None
+        return False
 
     def _apply_highlight_settings(self) -> bool:
         held = apply_config(self._highlighter, self.config)
