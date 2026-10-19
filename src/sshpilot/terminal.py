@@ -277,6 +277,7 @@ vte-terminal {
 class TerminalWidget(Gtk.Box):
     """A terminal widget for daemon sessions, local shells, and presentation."""
     __gtype_name__ = 'TerminalWidget'
+    _highlight_warning_shown = None  # last highlight fallback toasted
 
     # Signals
     __gsignals__ = {
@@ -5372,13 +5373,34 @@ class TerminalWidget(Gtk.Box):
         return False
 
     def _apply_highlight_settings(self) -> bool:
-        held = apply_config(self._highlighter, self.config)
+        highlighter = self._highlighter
+        held = apply_config(highlighter, self.config)
         logger.debug(
             "Output highlighting enabled=%s profile=%s theme=%s",
-            self._highlighter.enabled,
-            self._highlighter.profile,
-            self._highlighter.theme,
+            highlighter.enabled,
+            getattr(highlighter.profile, "name", highlighter.profile),
+            getattr(highlighter.theme, "name", highlighter.theme),
         )
+        # Every terminal resolves the same settings: toast a fallback once.
+        if highlighter.warning is None:
+            TerminalWidget._highlight_warning_shown = None
+        elif highlighter.warning != TerminalWidget._highlight_warning_shown:
+            warning = highlighter.warning
+            logger.warning("%s", warning)
+
+            def show():
+                if TerminalWidget._highlight_warning_shown != warning:
+                    try:
+                        toast = Adw.Toast.new(warning)
+                        toast.set_timeout(6)
+                    except Exception:
+                        return False
+                    if self._present_toast(toast):
+                        TerminalWidget._highlight_warning_shown = warning
+                return False
+
+            show()
+            GLib.idle_add(show)  # a new terminal is not in a window yet
         if held:
             # Switched off mid-escape: show the bytes that were held back.
             self.backend.feed(held)

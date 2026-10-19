@@ -28,6 +28,9 @@ Streaming rules:
 * A disabled highlighter returns its input unchanged but keeps tracking
   terminal state, so enabling it mid-session needs no resync.
 
+Custom profiles (:mod:`terminal_highlight_custom`) run on the SecureCRT line
+engine with their own rules; custom themes recolour it.
+
 This module is pure Python and does not import ``gi``.
 """
 
@@ -37,14 +40,31 @@ import ipaddress
 import itertools
 import re
 import time
-from typing import Callable, Dict, List, NamedTuple, Optional, Set, Tuple
+from gettext import gettext as _
+from typing import Callable, Dict, List, NamedTuple, Optional, Set, Tuple, Union
 
+from .terminal_highlight_custom import (
+    CustomProfile,
+    CustomTheme,
+    EditableRule,
+    Store,
+    check_colour,
+    custom_name,
+    hex_to_rgb,
+    load_store,
+    theme_colours,
+)
 from .terminal_highlight_securecrt import (
+    SECURECRT_RULES,
     CompiledRule,
+    Colour,
     THEMES as THEMES,
+    _safe_custom_pattern,
     compile_rules,
     line_owners,
+    load_rules,
     normalize_theme,
+    style_bytes,
 )
 
 PROFILES = ("generic", "cisco-ios", "cisco-securecrt", "junos", "huawei-vrp")
@@ -54,6 +74,7 @@ _RED, _GREEN, _YELLOW, _BLUE, _MAGENTA, _CYAN = 31, 32, 33, 34, 35, 36
 _MAX_VLAN = 4094
 _MAX_MPLS_LABEL = 1048575
 
+# Called with bytes by the legacy engine and with str by the line engine.
 Validator = Callable[[bytes, "re.Match[bytes]"], bool]
 
 
@@ -64,15 +85,19 @@ class Rule(NamedTuple):
     validate: Optional[Validator] = None
 
 
+def _bytes(text) -> bytes:
+    return text if isinstance(text, bytes) else text.encode("utf-8", "surrogateescape")
+
+
 def _numbers_at_most(limit: int, low: int = 0) -> Validator:
     def check(_full: bytes, m: "re.Match[bytes]") -> bool:
-        return all(low <= int(n) <= limit for n in re.findall(rb"\d+", m.group()))
+        return all(low <= int(n) <= limit for n in re.findall(rb"\d+", _bytes(m.group())))
 
     return check
 
 
 def _valid_ipv6(_full: bytes, m: "re.Match[bytes]") -> bool:
-    address, _, prefix = m.group().partition(b"/")
+    address, _sep, prefix = _bytes(m.group()).partition(b"/")
     if prefix and int(prefix) > 128:
         return False
     if not re.search(rb"[0-9A-Fa-f]", address):
@@ -88,7 +113,7 @@ _VERSION_BEFORE = re.compile(rb"(?i)(?:version|ver|release|build)[ :=]+\Z")
 
 
 def _not_a_version(full: bytes, m: "re.Match[bytes]") -> bool:
-    return _VERSION_BEFORE.search(full, max(0, m.start() - 16), m.start()) is None
+    return _VERSION_BEFORE.search(_bytes(full[max(0, m.start() - 16):m.start()])) is None
 
 
 _OCT = r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
@@ -211,9 +236,106 @@ class _Compiled(NamedTuple):
     priority_rules: Tuple[CompiledRule, ...]
 
 
-def _compile(profile: str, theme: str) -> _Compiled:
+# Duplicating a legacy profile gives each rule the role closest to its colour.
+_LEGACY_ROLES = {
+    "mac": "mac", "mac_dotted": "mac", "ipv6": "ip", "ipv4": "ip",
+    "iface": "interface", "iface_x": "interface", "vlan": "misc", "mpls": "misc",
+    "mpls_x": "misc", "state_ok": "good", "state_ok_x": "good", "state_bad": "bad",
+    "state_bad_x": "bad", "error": "bad",
+}
+# Built-in patterns run verbatim (with their checks) when found in a custom
+# profile; any other pattern must pass the custom-rule safety guard.
+_TRUSTED: Dict[str, Optional[Validator]] = {
+    **{rule.source: None for rule in SECURECRT_RULES},
+    **{rule.pattern: rule.validate for profile in PROFILES if profile != "cisco-securecrt"
+       for rule in _rules(profile)},
+}
+
+ProfileRef = Union[str, CustomProfile]
+ThemeRef = Union[str, CustomTheme]
+
+
+def profile_rules(profile: str) -> List[EditableRule]:
+    """Editable copy of a built-in profile: what *Duplicate* starts from."""
     if profile == "cisco-securecrt":
-        return _Compiled(None, {}, {}, compile_rules(theme))
+        return [EditableRule(rule.source, rule.role, rule.bold, match_case=rule.match_case)
+                for rule in (*SECURECRT_RULES, *load_rules()) if rule.role != "default"]
+    # Source order reproduces the legacy result: its only overlaps are tokens
+    # inside the error message, which runs to the line end and comes last.
+    return [EditableRule(rule.pattern, _LEGACY_ROLES[rule.name], match_case=True,
+                         description=rule.name)
+            for rule in _rules(normalize_profile(profile))]
+
+
+def check_rule(rule: EditableRule) -> Tuple[str, Optional[Validator]]:
+    """The pattern to compile and its check; ValueError with a message to show."""
+    check_colour(rule.colour)
+    if rule.pattern in _TRUSTED:
+        return rule.pattern, _TRUSTED[rule.pattern]
+    if not rule.pattern:
+        raise ValueError(_("Enter a pattern."))
+    try:
+        return _safe_custom_pattern(rule.pattern), None
+    except UnicodeEncodeError:
+        raise ValueError(_("Only ASCII characters are allowed in a pattern.")) from None
+    except re.error as exc:
+        raise ValueError(_("Invalid pattern: {error}").format(error=exc)) from None
+
+
+def check_profile(profile: CustomProfile) -> None:
+    """Raise ValueError naming the first rule a profile cannot use."""
+    for number, rule in enumerate(profile.rules, 1):
+        try:
+            check_rule(rule)
+        except ValueError as exc:
+            raise ValueError(_("Rule {number}: {error}").format(number=number, error=exc)) from None
+
+
+def _compile_custom(profile: CustomProfile, theme: ThemeRef) -> Tuple[CompiledRule, ...]:
+    check_profile(profile)
+    colours = theme_colours(theme)
+    compiled = []
+    for rule in profile.rules:
+        if rule.enabled:
+            pattern, validate = check_rule(rule)
+            opening, closing = style_bytes(rule.colour, colours, rule.bold)
+            flags = 0 if rule.match_case else re.IGNORECASE
+            compiled.append(CompiledRule(re.compile(pattern, flags), opening, closing,
+                                         rule.bold, validate))
+    return tuple(compiled)
+
+
+def preview_runs(profile: CustomProfile, theme: ThemeRef,
+                 line: str) -> List[Tuple[str, Colour, bool]]:
+    """(text, colour, bold) runs of one line as the line engine paints it.
+
+    The colour is ``None`` for unstyled text, else an RGB tuple or a palette
+    SGR code (``terminal-palette`` theme).
+    """
+    line = line[:LINE_MAX]
+    enabled = [rule for rule in profile.rules if rule.enabled]
+    colours = theme_colours(theme)
+    owners = line_owners(line, _compile_custom(profile, theme))
+    runs = []
+    pos = 0
+    for owner, group in itertools.groupby(owners):
+        end = pos + sum(1 for _owner in group)
+        if owner is None:
+            runs.append((line[pos:end], None, False))
+        else:
+            rule = enabled[owner]
+            colour = (hex_to_rgb(rule.colour) if rule.colour.startswith("#")
+                      else colours.get(rule.colour))
+            runs.append((line[pos:end], colour, rule.bold))
+        pos = end
+    return runs
+
+
+def _compile(profile: ProfileRef, theme: ThemeRef) -> _Compiled:
+    if isinstance(profile, CustomProfile):
+        return _Compiled(None, {}, {}, _compile_custom(profile, theme))
+    if profile == "cisco-securecrt":
+        return _Compiled(None, {}, {}, compile_rules(theme_colours(theme)))
     rules = _rules(profile)
     pattern = "|".join(f"(?P<{r.name}>{r.pattern})" for r in rules)
     return _Compiled(
@@ -224,8 +346,10 @@ def _compile(profile: str, theme: str) -> _Compiled:
     )
 
 
-# Only the SecureCRT profile has themes; legacy profiles share one entry.
-_COMPILED: Dict[Tuple[str, str], _Compiled] = {}
+# Only the SecureCRT and custom profiles have themes; legacy profiles share one
+# entry. Custom profiles and themes are keyed by content, so an edit compiles anew.
+_COMPILED: Dict[Tuple[ProfileRef, ThemeRef], _Compiled] = {}
+_COMPILED_MAX = 64
 
 _NEXT_RE = re.compile(rb"\x1b|\xc2(?:[\x80-\x9f]|\Z)")
 _CSI_RE = re.compile(rb"(?:\x1b\[|\xc2\x9b)([0-?]*)([ -/]*)([@-~])")
@@ -261,26 +385,39 @@ def normalize_profile(value: object) -> str:
 class Highlighter:
     """Stateful stream rewriter; one instance per terminal."""
 
-    def __init__(self, profile: str = "generic", enabled: bool = True,
-                 theme: str = "securecrt",
+    def __init__(self, profile: ProfileRef = "generic", enabled: bool = True,
+                 theme: ThemeRef = "securecrt",
                  clock: Callable[[], float] = time.monotonic) -> None:
         self.enabled = enabled
         self._clock = clock
         self._fed_at = 0.0
-        self.theme = normalize_theme(theme)
+        self.warning: Optional[str] = None  # set by apply_config on a fallback
+        self.theme = theme if isinstance(theme, CustomTheme) else normalize_theme(theme)
         self.set_profile(profile)
         self.reset()
 
-    def set_profile(self, profile: str, theme: Optional[str] = None) -> None:
-        """Switch rules; nothing changes unless compiling succeeded."""
-        profile = normalize_profile(profile)
-        theme = self.theme if theme is None else normalize_theme(theme)
-        key = profile, theme if profile == "cisco-securecrt" else ""
+    def set_profile(self, profile: ProfileRef, theme: Optional[ThemeRef] = None) -> None:
+        """Switch rules; nothing changes unless compiling succeeded.
+
+        Raises ValueError for a custom profile with an unusable rule.
+        """
+        if not isinstance(profile, CustomProfile):
+            profile = normalize_profile(profile)
+        if theme is None:
+            theme = self.theme
+        elif not isinstance(theme, CustomTheme):
+            theme = normalize_theme(theme)
+        themed = isinstance(profile, CustomProfile) or profile == "cisco-securecrt"
+        key = profile, theme if themed else ""
         if key not in _COMPILED:
-            _COMPILED[key] = _compile(*key)
+            compiled = _compile(*key)
+            if len(_COMPILED) >= _COMPILED_MAX:
+                _COMPILED.clear()
+            _COMPILED[key] = compiled
         self.profile, self.theme, self._compiled = profile, theme, _COMPILED[key]
 
-    def configure(self, enabled: bool, profile: str, theme: Optional[str] = None) -> bytes:
+    def configure(self, enabled: bool, profile: ProfileRef,
+                  theme: Optional[ThemeRef] = None) -> bytes:
         """Apply settings without losing stream state.
 
         Returns bytes that were held back and must now be displayed unchanged
@@ -471,7 +608,7 @@ class Highlighter:
                         next(it, None)
 
     def _text(self, text: bytes, last: bool) -> bytes:
-        if self.enabled and not self._alt_modes and self._compiled.priority_rules:
+        if self.enabled and not self._alt_modes and self._compiled.regex is None:
             return self._line_text_feed(text)
         ctx, carry, self._ctx, self._carry = self._ctx, self._carry, b"", b""
         if (
@@ -584,7 +721,7 @@ class Highlighter:
                 continue
             start = 0
             # Adjacent rules with the same style form one run.
-            styles = (None if owner is None else rules[owner][1:] for owner in seg_owners)
+            styles = (None if owner is None else rules[owner][1:4] for owner in seg_owners)
             for style, run in itertools.groupby(styles):
                 end = start + sum(1 for _ in run)
                 chunk, start = data[start:end], end
@@ -626,14 +763,41 @@ def _byte_owners(line: bytes, rules: Tuple[CompiledRule, ...]) -> List[Optional[
             for _ in range(len(char.encode("utf-8", "surrogateescape")))]
 
 
-def apply_config(highlighter: Highlighter, config: object) -> bytes:
+def apply_config(highlighter: Highlighter, config: object,
+                 store: Optional[Store] = None) -> bytes:
     """Sync ``highlighter`` with the terminal highlight settings.
 
-    Returns bytes to display unchanged (see ``Highlighter.configure``).
+    Returns bytes to display unchanged (see ``Highlighter.configure``). A
+    custom profile or theme that is missing, unreadable or unusable keeps the
+    current one, and ``highlighter.warning`` says why (else it is None).
     """
     get = config.get_setting  # type: ignore[attr-defined]
-    return highlighter.configure(
-        get("terminal.highlight_enabled", False) is True,
-        normalize_profile(get("terminal.highlight_profile", "generic")),
-        normalize_theme(get("terminal.highlight_theme", "securecrt")),
+    store = load_store() if store is None else store
+    warnings: List[str] = []
+
+    def resolve(value, entries, current, normalize, message):
+        name = custom_name(value)
+        if name is None:
+            return normalize(value)
+        if name in entries:
+            return entries[name]
+        warnings.append(message.format(name=name) + (f" ({store.error})" if store.error else ""))
+        return current
+
+    enabled = get("terminal.highlight_enabled", False) is True
+    profile = resolve(
+        get("terminal.highlight_profile", "generic"), store.profiles, highlighter.profile,
+        normalize_profile, _("Highlight profile “{name}” is unavailable; keeping the previous one."),
     )
+    theme = resolve(
+        get("terminal.highlight_theme", "securecrt"), store.themes, highlighter.theme,
+        normalize_theme, _("Highlight theme “{name}” is unavailable; keeping the previous one."),
+    )
+    try:
+        held = highlighter.configure(enabled, profile, theme)
+    except ValueError as exc:
+        warnings.append(_("Highlight profile “{name}” cannot be used: {error}").format(
+            name=getattr(profile, "name", profile), error=exc))
+        held = highlighter.configure(enabled, highlighter.profile, theme)
+    highlighter.warning = " ".join(warnings) or None
+    return held

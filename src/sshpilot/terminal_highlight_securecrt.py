@@ -16,7 +16,7 @@ import logging
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Tuple, Union
+from typing import Callable, Dict, List, Mapping, NamedTuple, Optional, Tuple, Union
 
 from .platform.paths import get_config_dir
 
@@ -48,6 +48,9 @@ class CompiledRule(NamedTuple):
     opening: bytes
     closing: bytes
     bold: bool
+    # (line, match) -> keep the match; built-in patterns of the legacy profiles
+    # used in a custom profile bring their checks along.
+    validate: Optional[Callable[[str, "re.Match[str]"], bool]] = None
 
 
 def _r(source: str, role: str, bold: bool = False) -> SecureCRTRule:
@@ -150,12 +153,16 @@ def normalize_theme(value: object) -> str:
     return value if isinstance(value, str) and value in THEMES else "securecrt"
 
 
-def style_bytes(role: str, theme: str, bold: bool = False) -> Tuple[bytes, bytes]:
+Theme = Union[str, Mapping[str, Colour]]  # a theme id or its role colours
+
+
+def style_bytes(role: str, theme: Theme, bold: bool = False) -> Tuple[bytes, bytes]:
     """Return opening/closing SGR for a semantic role or literal ``#RRGGBB``."""
     if role.startswith("#") and re.fullmatch(r"#[0-9A-Fa-f]{6}", role):
         colour: Colour = tuple(bytes.fromhex(role[1:]))  # type: ignore[assignment]
     else:
-        colour = THEME_COLOURS[normalize_theme(theme)].get(role)
+        colours = theme if isinstance(theme, Mapping) else THEME_COLOURS[normalize_theme(theme)]
+        colour = colours.get(role)
     if colour is None:
         return b"", b""
     prefix = b"1;" if bold else b""
@@ -368,7 +375,7 @@ def load_rules(path: Optional[Path] = None) -> List[SecureCRTRule]:
     return rules
 
 
-def compile_rules(theme: str) -> Tuple[CompiledRule, ...]:
+def compile_rules(theme: Theme) -> Tuple[CompiledRule, ...]:
     """Compile the built-in profile plus the optional user override file."""
     try:
         custom = load_rules()
@@ -396,6 +403,8 @@ def line_owners(line: str, rules: Tuple[CompiledRule, ...]) -> List[Optional[int
         if not rule.opening:  # final SecureCRT default rule is the unstyled baseline
             continue
         for match in rule.regex.finditer(line):
+            if rule.validate is not None and not rule.validate(line, match):
+                continue
             start, end = match.span()
             owners[start:end] = [priority] * (end - start)
     return owners
