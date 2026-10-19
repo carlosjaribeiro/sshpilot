@@ -791,3 +791,15 @@ def test_version_guard_works_across_chunks():
     h.reset()
     assert h.feed(b"host ") == b"host "
     assert h.feed(b"1.2.3.4") == colour(b"1.2.3.4", 36)
+
+
+def test_apply_highlight_settings_logs_state_at_debug(caplog):
+    import logging
+
+    from sshpilot.terminal import TerminalWidget
+
+    w = TerminalWidget.__new__(TerminalWidget)
+    w.config = _Config(**{"terminal.highlight_enabled": True, "terminal.highlight_profile": "junos"})
+    with caplog.at_level(logging.DEBUG, logger="sshpilot.terminal"):
+        TerminalWidget._apply_highlight_settings(w)
+    assert "Output highlighting enabled=True profile=junos" in caplog.text

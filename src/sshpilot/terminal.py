@@ -5312,6 +5312,11 @@ class TerminalWidget(Gtk.Box):
 
     def _apply_highlight_settings(self) -> bool:
         held = apply_config(self._highlighter, self.config)
+        logger.debug(
+            "Output highlighting enabled=%s profile=%s",
+            self._highlighter.enabled,
+            self._highlighter.profile,
+        )
         if held:
             # Switched off mid-escape: show the bytes that were held back.
             self.backend.feed(held)
