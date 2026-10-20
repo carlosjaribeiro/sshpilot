@@ -4,7 +4,7 @@
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path -Parent $PSScriptRoot)
 
-$features = "feat/securecrt-style-profile", "feat/session-logging", "feat/securecrt-session-import"
+$features = "feat/securecrt-style-profile", "feat/highlight-profile-editor", "feat/securecrt-r4", "feat/session-logging", "feat/securecrt-session-import"
 $py = if (Test-Path ".venv-win\Scripts\python.exe") { ".venv-win\Scripts\python.exe" } else { "python" }
 
 function Git { & git @args; if ($LASTEXITCODE -ne 0) { throw "git $args failed" } }
@@ -34,6 +34,7 @@ foreach ($ref in @("upstream/main") + ($features | ForEach-Object { "origin/$_" 
 & $py -m ruff check src tests scripts/generate_api_artifacts.py scripts/securecrt_to_asbru.py
 if ($LASTEXITCODE -ne 0) { throw "ruff failed" }
 & $py -m pytest -q tests/test_terminal_highlight.py tests/test_terminal_session_log.py `
+    tests/test_terminal_highlight_custom.py tests/test_terminal_highlight_words.py `
     tests/test_terminal_session_log_widget.py tests/core/test_securecrt_to_asbru.py `
     tests/test_highlight_session_log_integration.py
 if ($LASTEXITCODE -ne 0) { throw "tests failed" }

@@ -1,10 +1,12 @@
 # Personal build (`carlos-custom`)
 
-`carlos-custom` is upstream `main` plus three fork feature branches, merged (never rebased):
+`carlos-custom` is upstream `main` plus five fork feature branches, merged (never rebased):
 
 | Branch | Adds |
 |---|---|
 | `feat/securecrt-style-profile` | Network-output highlighting (includes `feat/network-output-highlighting-pr`) |
+| `feat/highlight-profile-editor` | Custom highlight profile and theme editor |
+| `feat/securecrt-r4` | SecureCRT R4 terminal highlighting patterns and word handling |
 | `feat/session-logging` | SecureCRT-style automatic session logging |
 | `feat/securecrt-session-import` | SecureCRT session converter |
 
@@ -74,7 +76,7 @@ scripts/update-custom.sh          # Linux
 powershell -ExecutionPolicy Bypass -File scripts\update-custom.ps1   # Windows
 ```
 
-It fetches `upstream` and `origin`, merges `upstream/main` and then the three feature
+It fetches `upstream` and `origin`, merges `upstream/main` and then the five feature
 branches into `carlos-custom` (merge, not rebase), runs ruff and the highlight / logging /
-import tests, and prints what changed. On a merge conflict it stops and tells you how to
+import tests (including the custom profile editor and SecureCRT word tests), and prints what changed. On a merge conflict it stops and tells you how to
 finish or abort. It never pushes: publish with `git push origin carlos-custom` (never force).
