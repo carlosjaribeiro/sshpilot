@@ -47,6 +47,9 @@ src/sshpilot/gtk/transfer_error_messages.py
 src/sshpilot/gtk/sftp_failure_messages.py
 src/sshpilot/gtk/secret_status_messages.py
 src/sshpilot/gtk/secret_transfer_messages.py
+src/sshpilot/highlight_editor_common.py
+src/sshpilot/highlight_profile_editor.py
+src/sshpilot/highlight_theme_editor.py
 src/sshpilot/host_info_payload.py
 src/sshpilot/host_info_shell.py
 src/sshpilot/host_info_tab.py

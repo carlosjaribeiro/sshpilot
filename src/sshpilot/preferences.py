@@ -35,7 +35,8 @@ from .terminal_cursor import (
     normalize_cursor_blink,
     normalize_cursor_shape,
 )
-from .terminal_highlight import PROFILES, THEMES, normalize_profile, normalize_theme
+from .terminal_highlight import PROFILES, THEMES
+from .terminal_highlight_custom import custom_id, custom_name, load_store as load_highlight_store
 
 
 import gi
@@ -766,32 +767,18 @@ class PreferencesWindow(Adw.Window):
 
         self.highlight_profile_row = Adw.ComboRow()
         self.highlight_profile_row.set_title(_("Highlight Profile"))
-        profile_model = Gtk.StringList()
-        for label in (
-            _("Generic"), _("Cisco IOS"), _("Cisco (SecureCRT-style)"),
-            _("Junos"), _("Huawei VRP"),
-        ):
-            profile_model.append(label)
-        self.highlight_profile_row.set_model(profile_model)
-        current = normalize_profile(self.config.get_setting('terminal.highlight_profile', None))
-        self.highlight_profile_row.set_selected(PROFILES.index(current))
+        self._add_highlight_buttons(self.highlight_profile_row, 'profile', (
+            _("Edit Profile…"), _("Duplicate Profile…"), _("Delete Profile"),
+        ))
         self.highlight_profile_row.connect('notify::selected', self.on_highlight_profile_changed)
         group.add(self.highlight_profile_row)
 
         self.highlight_theme_row = Adw.ComboRow()
         self.highlight_theme_row.set_title(_("Highlight Colour Theme"))
-        theme_model = Gtk.StringList()
-        for label in (
-            _("SecureCRT"), _("Dark"), _("Light"), _("High Contrast"),
-            _("Terminal Palette"),
-        ):
-            theme_model.append(label)
-        self.highlight_theme_row.set_model(theme_model)
-        theme = normalize_theme(self.config.get_setting('terminal.highlight_theme', None))
-        self.highlight_theme_row.set_selected(THEMES.index(theme))
+        self._add_highlight_buttons(self.highlight_theme_row, 'theme', (
+            _("Edit Theme…"), _("Duplicate Theme…"), _("Delete Theme"),
+        ))
         self.highlight_theme_row.connect('notify::selected', self.on_highlight_theme_changed)
-        # Only the SecureCRT-style profile has colour themes.
-        self.highlight_theme_row.set_sensitive(current == 'cisco-securecrt')
         group.add(self.highlight_theme_row)
 
         self.highlight_bold_row = Adw.SwitchRow()
@@ -802,33 +789,130 @@ class PreferencesWindow(Adw.Window):
         )
         self.highlight_bold_row.connect(
             'notify::active',
-            lambda row, _param: self.config.set_setting(
-                'terminal.highlight_bold', row.get_active()
-            ),
+            lambda row, _param: self.config.set_setting('terminal.highlight_bold', row.get_active()),
         )
-        self.highlight_bold_row.set_sensitive(current == 'cisco-securecrt')
+        self.highlight_bold_row.set_sensitive(
+            self.config.get_setting('terminal.highlight_profile', 'generic') == 'cisco-securecrt'
+        )
         group.add(self.highlight_bold_row)
 
+        self._reload_highlight_rows()
+        error = load_highlight_store().error
+        if error:
+            GLib.idle_add(self._show_plain_toast, error)
         terminal_page.add(group)
+
+    def _add_highlight_buttons(self, row, kind, tooltips):
+        buttons = {}
+        for name, icon, tooltip in zip(
+            ('edit', 'duplicate', 'delete'),
+            ('document-edit-symbolic', 'edit-copy-symbolic', 'user-trash-symbolic'),
+            tooltips,
+        ):
+            button = Gtk.Button(icon_name=icon, tooltip_text=tooltip, valign=Gtk.Align.CENTER)
+            button.add_css_class('flat')
+            button.connect('clicked', self._on_highlight_button, kind, name)
+            row.add_suffix(button)
+            buttons[name] = button
+        setattr(self, f'_highlight_{kind}_buttons', buttons)
+
+    def _reload_highlight_rows(self):
+        """Rebuild both selectors from the built-ins plus the saved custom entries."""
+        from .highlight_editor_common import profile_label, theme_label
+
+        store = load_highlight_store()
+        self._highlight_syncing = True
+        try:
+            for kind, row, ids, default in (
+                ('profile', self.highlight_profile_row,
+                 [*PROFILES, *map(custom_id, store.profiles)], 'generic'),
+                ('theme', self.highlight_theme_row,
+                 [*THEMES, *map(custom_id, store.themes)], 'securecrt'),
+            ):
+                label = profile_label if kind == 'profile' else theme_label
+                row.set_model(Gtk.StringList.new([label(value) for value in ids]))
+                current = self.config.get_setting(f'terminal.highlight_{kind}', default)
+                row.set_selected(ids.index(current) if current in ids else ids.index(default))
+                setattr(self, f'_highlight_{kind}_ids', ids)
+        finally:
+            self._highlight_syncing = False
+        for kind in ('profile', 'theme'):
+            self._sync_highlight_selection(kind, self._selected_highlight(kind))
+
+    def _selected_highlight(self, kind, row=None):
+        if row is None:
+            row = self.highlight_profile_row if kind == 'profile' else self.highlight_theme_row
+        ids = getattr(self, f'_highlight_{kind}_ids', None) or (
+            PROFILES if kind == 'profile' else THEMES
+        )
+        index = row.get_selected()
+        return ids[index] if 0 <= index < len(ids) else None
+
+    def _sync_highlight_selection(self, kind, selected):
+        """Grey out what does not apply to the selected profile or theme."""
+        theme_row = getattr(self, 'highlight_theme_row', None)
+        bold_row = getattr(self, 'highlight_bold_row', None)
+        if kind == 'profile' and bold_row is not None:
+            bold_row.set_sensitive(selected == 'cisco-securecrt')
+        if kind == 'profile' and theme_row is not None:
+            # Legacy profiles keep their palette colours; themes colour the others.
+            theme_row.set_sensitive(
+                selected == 'cisco-securecrt' or custom_name(selected) is not None
+            )
+        buttons = getattr(self, f'_highlight_{kind}_buttons', None)
+        if buttons:
+            buttons['delete'].set_sensitive(custom_name(selected) is not None)
+
+    def _on_highlight_button(self, _button, kind, action):
+        from .highlight_editor_common import confirm_delete
+        from .highlight_profile_editor import open_profile_editor
+        from .highlight_theme_editor import open_theme_editor
+
+        selected = self._selected_highlight(kind)
+        if selected is None:
+            return
+        key = f'terminal.highlight_{kind}'
+
+        def on_saved(value):
+            self.config.set_setting(key, value)  # terminals re-apply on this signal
+            self._reload_highlight_rows()
+
+        def on_deleted():
+            if self.config.get_setting(key, None) == selected:
+                self.config.set_setting(key, 'generic' if kind == 'profile' else 'securecrt')
+            self._reload_highlight_rows()
+
+        if action == 'delete':
+            confirm_delete(self, kind, custom_name(selected), on_deleted,
+                           self._show_plain_toast)
+        else:
+            opener = open_profile_editor if kind == 'profile' else open_theme_editor
+            opener(self, self.config, selected, on_saved, duplicate=action == 'duplicate')
+
+    def _show_plain_toast(self, message):
+        """Toast ``message`` as text: names and regex errors may hold ``<`` or ``&``."""
+        from .highlight_editor_common import plain_toast
+
+        try:
+            self.add_toast(plain_toast(message))
+        except Exception:
+            logger.info(message)
+        return False
 
     def on_highlight_enabled_changed(self, switch_row, _param):
         self.config.set_setting('terminal.highlight_enabled', switch_row.get_active())
 
     def on_highlight_profile_changed(self, combo_row, _param):
-        index = combo_row.get_selected()
-        if 0 <= index < len(PROFILES):
-            self.config.set_setting('terminal.highlight_profile', PROFILES[index])
-            theme_row = getattr(self, 'highlight_theme_row', None)
-            if theme_row is not None:
-                theme_row.set_sensitive(PROFILES[index] == 'cisco-securecrt')
-            bold_row = getattr(self, 'highlight_bold_row', None)
-            if bold_row is not None:
-                bold_row.set_sensitive(PROFILES[index] == 'cisco-securecrt')
+        self._on_highlight_selected('profile', combo_row)
 
     def on_highlight_theme_changed(self, combo_row, _param):
-        index = combo_row.get_selected()
-        if 0 <= index < len(THEMES):
-            self.config.set_setting('terminal.highlight_theme', THEMES[index])
+        self._on_highlight_selected('theme', combo_row)
+
+    def _on_highlight_selected(self, kind, combo_row):
+        selected = self._selected_highlight(kind, combo_row)
+        if selected is not None and not getattr(self, '_highlight_syncing', False):
+            self.config.set_setting(f'terminal.highlight_{kind}', selected)
+            self._sync_highlight_selection(kind, selected)
 
     def on_cursor_shape_changed(self, combo_row, _param):
         index = combo_row.get_selected()
@@ -1057,6 +1141,7 @@ class PreferencesWindow(Adw.Window):
         terminal_page.add(mouse_group)
 
         self._add_remote_clipboard_group(terminal_page)
+
 
     def _add_remote_clipboard_group(self, terminal_page):
         """OSC 52: let programs on the remote host write the local clipboard."""

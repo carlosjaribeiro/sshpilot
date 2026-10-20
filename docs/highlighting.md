@@ -16,6 +16,8 @@ Profiles:
   non-whitespace word; later rules win on overlap. As in the source list
   (`D:"Match Case"=00000000`), every rule is case-insensitive. See
   [SecureCRT line engine](#securecrt-line-engine).
+- **Custom profiles** are your own copies of any of the above, listed after the
+  built-ins. See [Editing profiles and themes](#editing-profiles-and-themes).
 
 ## Colour themes
 
@@ -29,7 +31,8 @@ variant (its accents keep at least 4.5:1 contrast on white), and
 `high-contrast` maximises separation. `terminal-palette` emits ANSI palette
 indices 31–36 and 90–97 (grey roles use 90, never 37, which is invisible on a
 white background) so the terminal theme owns the actual colours. Themes apply
-to the SecureCRT profile; the setting is greyed out for the other built-ins.
+to this profile and to custom profiles; the setting is greyed out for the
+others. Custom themes (copies with your own colours) are listed after these.
 
 `securecrt` is designed for a light background (SecureCRT's own `Cisco Words`;
 VanDyke ships a separate `DkBg` list for dark ones). `securecrt-dark` is a
@@ -47,6 +50,106 @@ highlighted run of the *Cisco (SecureCRT-style)* profile bold, as SecureCRT does
 with its session-wide bold option (the file only flags the progress rule). Bold
 the remote has set is kept, not restarted or cancelled. Other profiles ignore it.
 
+## Editing profiles and themes
+
+Built-in profiles and themes are read-only. To make your own, open
+**Settings → Terminal → Highlighting**, select the one to start from and use
+the buttons on its row:
+
+- **Edit** (pencil): for a built-in, opens a copy named "… (copy)"; for a custom
+  one, edits it. **Save** stores it; when editing a custom entry, **Save as New**
+  keeps the original and stores a copy once the *Name* field holds a new name.
+  Closing with unsaved changes asks first.
+- **Duplicate** (two pages): always opens a copy, also of a custom entry.
+- **Delete** (bin): custom entries only, after a confirmation. Terminals using it
+  switch to *Generic* (profile) or *SecureCRT* (theme).
+
+Whatever you save becomes the selected profile or theme, and open terminals use
+it for new output at once; no restart is needed.
+
+The profile editor lists the rules in order. **Where two rules match the same
+text, the later one wins**, so put general rules first and exceptions after
+them. Expand a rule to change its regular expression, an optional description,
+its colour (a *role* such as *IP address*, which follows the colour theme, or a
+fixed *custom colour* picked or typed as `#RRGGBB`), bold, case matching, and to
+move it up or down or remove it. The switch on each row turns a rule off without
+deleting it. **+** adds a rule; **Import…** appends the rules of a SecureCRT
+keyword-list export or a simple rules file (see [Custom rules](#custom-rules)).
+
+The **Live Preview** paints sample `show ip interface brief`, `show running-config`
+and syslog lines with the rules being edited (the theme editor: with the
+selected profile), on the current terminal colours. Paste a line of your own
+into **Test text** to see it on top. A copy of *Cisco (SecureCRT-style)* paints
+exactly like the built-in, including its adapted rules that colour parts of
+words (`h` in `GigabitEthernet`, `as` in `unassigned`; see the
+deviations table below).
+
+Validation happens while you type and before anything is written: a rule must
+pass the same safety check as the rules file (see [Custom rules](#custom-rules)),
+and a name must be non-empty, at most 64 characters, and not used by another
+custom profile (or theme) or a built-in one (`generic`, *Generic*, …), ignoring
+case. Descriptions are at most 200 characters. Problems are shown in a banner and on
+the rule's row, and **Save** stays disabled until they are fixed. A profile has
+at most 500 rules; at most 100 custom profiles and 100 custom themes are kept.
+
+Copies of the built-ins behave like the originals:
+
+- *Cisco (SecureCRT-style)*: the 50 enabled source rules (plus those of a
+  `highlight_rules.*` file), in order; the no-op default-colour rule is left out.
+- *Generic*, *Cisco IOS*, *Junos*, *Huawei VRP*: their rules, in order and
+  case-sensitive (*Match case* on), each described by its token (`ipv4`,
+  `vlan`, …). Their range checks come along (an address after `Version` is not
+  an IP, `vlan 5000` is out of range) as long as the expression is left
+  unchanged. Colours become roles (interfaces *Interface*, VLAN/MPLS
+  *Miscellaneous*, errors *Bad*, …), so the colour theme now applies to them.
+
+Any built-in expression, from any profile, runs unchanged. An edited or new
+expression must fit the allowlist under [Custom rules](#custom-rules).
+
+The theme editor shows every role with its colour in the base theme. Pick a
+colour or type `#RRGGBB` to change it; the undo button returns a role to the
+base colour. A custom theme stores only the changed roles, on top of its base.
+
+### Where they are stored
+
+Custom profiles and themes are saved together in `highlight_profiles.json` in
+sshPilot's configuration directory:
+
+| System | File |
+|---|---|
+| Linux | `~/.config/sshpilot/highlight_profiles.json` (`$XDG_CONFIG_HOME/sshpilot/…` if set) |
+| Linux, Flatpak | `~/.var/app/io.github.mfat.sshpilot/config/sshpilot/highlight_profiles.json` |
+| Windows | `%APPDATA%\sshpilot\highlight_profiles.json` |
+
+The file is versioned JSON and may be copied between machines:
+
+```json
+{
+  "version": 1,
+  "profiles": [
+    {"name": "Example profile", "rules": [
+      {"pattern": "\\bcore\\b", "colour": "important", "bold": true,
+       "enabled": true, "match_case": false, "description": "Core links"}
+    ]}
+  ],
+  "themes": [
+    {"name": "Example dark", "base": "dark", "colours": {"ip": "#00FF00"}}
+  ]
+}
+```
+
+A file that cannot be read (bad JSON, unknown version, duplicate names, unknown
+roles, larger than 256 KiB) never stops highlighting: terminals keep the
+profile and theme they had (the defaults at start-up) and show a notification,
+as they do when a selected custom profile is missing or one of its rules fails
+the safety check. Saving from the editor then moves the unreadable file to
+`highlight_profiles.json.bad` and writes a new one; a save that would make the
+file larger than 256 KiB is refused. Edits made to the file by hand are picked
+up on the next highlighting setting change.
+
+Every save re-reads the file and replaces it atomically, so two sshPilot
+windows or processes do not undo each other's saved profiles; only two saves
+in the very same instant can lose one of them (there is no lock file).
 
 ## Custom rules
 
