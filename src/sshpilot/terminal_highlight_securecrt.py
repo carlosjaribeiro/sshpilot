@@ -430,8 +430,10 @@ def whole_word(pattern: str) -> str:
 
     A lookaround rather than a post-filter, so the regex still backtracks to
     an alternative that fits (``shut.*`` after a word start, not ``no`` in ``none``).
+    Each ``.*`` stays inside one word (``\\S*``): ``snmp.*`` colours
+    ``snmp-server``, ``.*down.?`` colours ``UPDOWN:``, not the rest of the line.
     """
-    return _WHOLE_WORD.format(pattern)
+    return _WHOLE_WORD.format(re.sub(r"(?<!\\)\.\*", r"\\S*", pattern))
 
 
 def line_owners(line: str, rules: Tuple[CompiledRule, ...]) -> List[Optional[int]]:
