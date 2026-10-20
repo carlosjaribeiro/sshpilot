@@ -119,14 +119,20 @@ def conpty_passes_through(daemon: bool = True) -> bool:
     # daemon/conpty_runner.py: CONPTY_BACKEND_ENV
     if daemon and (os.environ.get("SSHPILOT_CONPTY_BACKEND") or "").strip().lower() in ("pywinpty", "winpty"):
         return False
+    source = conpty_source()
+    return source not in ("kernel32", "") and os.path.isfile(os.path.join(os.path.dirname(source), "OpenConsole.exe"))
+
+
+def conpty_source() -> str:
+    """The pseudo-console DLL ConPTY sessions here use, ``kernel32``, or ``""``."""
+
     try:
         from .platform.windows.conpty import default_api
 
-        source = default_api().source
-        return source != "kernel32" and os.path.isfile(os.path.join(os.path.dirname(source), "OpenConsole.exe"))
+        return default_api().source
     except Exception:  # noqa: BLE001 - the old, conservative behaviour
         logger.debug("Could not resolve the ConPTY DLL", exc_info=True)
-        return False
+        return ""
 
 
 def _any_model_importable() -> bool:
@@ -1225,7 +1231,26 @@ class PyteTerminalBackend:
             wanted = bool(config.get_setting("terminal.reflow_visible_screen", True)) if config else True
         except Exception:  # noqa: BLE001
             wanted = True
-        model.passthrough = wanted and conpty_passes_through(daemon)
+        passes = conpty_passes_through(daemon)
+        model.passthrough = wanted and passes
+        if getattr(self, "_conpty_logged", False):
+            return
+        self._conpty_logged = True
+        logger.info(
+            "ConPTY terminal: model=%s pull_history_on_grow=%s passthrough=%s "
+            "reflow_visible_screen=%s conpty_passes_through=%s source=%s",
+            type(model).__name__,
+            model.pull_history_on_grow,
+            model.passthrough,
+            wanted,
+            passes,
+            conpty_source() or "unresolved",
+        )
+        if wanted and self.view.model_name == "vterm":
+            logger.info(
+                "Visible-screen reflow on resize is only available with the pyte model "
+                "(Preferences > Terminal > Terminal Backend)"
+            )
 
     def get_pty(self) -> Optional[Any]:
         return None

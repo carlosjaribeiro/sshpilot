@@ -52,6 +52,19 @@ conpty.dll starts the inbox conhost, which repaints (measured).
 `SSHPILOT_CONPTY_BACKEND=pywinpty` only affects daemon sessions; local
 shells always use the ctypes binding.
 
+The window resolves the DLL itself; it cannot ask the daemon. They agree
+when the app starts the daemon: the daemon inherits the window's environment
+(`SSHPILOT_CONPTY_DLL` included) and runs from the same install, and the
+lookup uses absolute paths (the source checkout, or the frozen exe's
+directory and `_MEIPASS`), never the working directory. A daemon started
+on its own with another environment, or left running from another install,
+can differ. Each terminal logs one INFO line, `ConPTY terminal: model=…
+pull_history_on_grow=… passthrough=… reflow_visible_screen=…
+conpty_passes_through=… source=…`, to check. The libvterm model, the
+Windows default, does not reflow the screen; with it the log adds a line
+pointing to the pyte model, and so does the libvterm entry's subtitle in
+Preferences > Terminal > Terminal Backend.
+
 Rows the main screen pushes into history when it comes back from the
 alternate screen count as `scrollback_pushes`, so a scrolled-back view stays
 on its text. A width change itself rewrites the history, and the view only

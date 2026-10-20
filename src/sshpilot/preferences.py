@@ -6956,7 +6956,7 @@ class PreferencesWindow(Adw.Window):
                         if vterm_error is None else _('libvterm (unavailable)')
                     ),
                     'description': (
-                        _('Native terminal emulator drawn with GTK, faster on bulk output')
+                        _('Native terminal emulator drawn with GTK, faster on bulk output') + '. ' + _('Text reflow on resize needs the pyte model.')
                         if vterm_error is None else _('Requires the libvterm library')
                     ),
                     'available': vterm_error is None,

@@ -123,6 +123,39 @@ def test_scrolled_back_view_keeps_its_text_when_the_main_screen_returns(monkeypa
     assert view.model.row_text(view.model.viewport_top(view.scroll_offset)) == top
 
 
+@pytest.mark.parametrize("model, setting, hint", [("pyte", True, False), ("vterm", True, True), ("vterm", False, False)])
+def test_conpty_terminals_log_their_reflow_state_once(model, setting, hint, monkeypatch, tmp_path, caplog):
+    import logging
+    import types
+
+    from sshpilot import terminal_backend_pyte
+    from sshpilot.platform.windows import conpty
+
+    dll = tmp_path / "conpty.dll"
+    dll.write_bytes(b"")
+    (tmp_path / "OpenConsole.exe").write_bytes(b"")
+    monkeypatch.setenv("SSHPILOT_TERMINAL_MODEL", model)
+    monkeypatch.delenv("SSHPILOT_CONPTY_BACKEND", raising=False)
+    settings = {"terminal.reflow_visible_screen": setting}
+    config = types.SimpleNamespace(get_setting=lambda key, default=None: settings.get(key, default))
+    backend = terminal_backend_pyte.PyteTerminalBackend(types.SimpleNamespace(config=config))
+    # Without libvterm installed the view falls back to pyte; the hint keys on the name.
+    monkeypatch.setattr(backend.view, "model_name", model)
+    monkeypatch.setattr(terminal_backend_pyte.sys, "platform", "win32")
+    monkeypatch.setattr(conpty, "default_api", lambda: types.SimpleNamespace(source=str(dll)))
+    with caplog.at_level(logging.INFO, logger=terminal_backend_pyte.logger.name):
+        backend.prepare_pty_less_emulation()
+        backend.prepare_pty_less_emulation()
+    states = [r.getMessage() for r in caplog.records if r.getMessage().startswith("ConPTY terminal:")]
+    expected_model = type(backend.view.model).__name__
+    assert states == [
+        f"ConPTY terminal: model={expected_model} pull_history_on_grow=False "
+        f"passthrough={setting} reflow_visible_screen={setting} conpty_passes_through=True source={dll}"
+    ]
+    hints = [r.getMessage() for r in caplog.records if "only available with the pyte model" in r.getMessage()]
+    assert len(hints) == (1 if hint else 0)
+
+
 @pytest.mark.parametrize("model", ["pyte", "vterm"])
 def test_synchronized_update_holds_the_repaint(model, monkeypatch):
     monkeypatch.setenv("SSHPILOT_TERMINAL_MODEL", model)
