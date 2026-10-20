@@ -9,9 +9,8 @@ never changed: stripping injected SGR from the output gives back the input.
 Streaming rules:
 
 * Escape sequences split across chunks are held until complete. Control
-  strings (OSC, DCS, SOS, PM, APC) keep their byte order with held lines and
-  are cancelled after 4096 bytes; OSC ends at BEL or ST, the others at ST. C1
-  controls are recognised in
+  strings (OSC, DCS, SOS, PM, APC) keep their byte order with held lines; OSC
+  ends at BEL or ST, the others at ST. C1 controls are recognised in
   their UTF-8 form (``C2 9B`` ...), never as raw 8-bit bytes, which are UTF-8
   continuation bytes.
 * Legacy profiles never hold text back: a token split across chunks is
@@ -392,7 +391,6 @@ _ST_END_RE = re.compile(rb"\x1b\\|\xc2\x9c|[\x18\x1a]|\x1b(?!\\|\Z)")
 _TAIL_RE = re.compile(rb"[^\x00-\x20\x7f]*\Z")  # trailing run of non-break bytes
 _ALT_SCREEN_MODES = {b"47", b"1047", b"1049"}
 _CARRY_MAX = 64
-_STRING_MAX = 4096
 FLUSH_DELAY = 0.05  # seconds an unfinished SecureCRT line may wait
 # Keeps any real Cisco line whole; the quadratic ``.*X`` source rules cost
 # about 0.25 s on a hostile 4096-byte line.
@@ -477,7 +475,6 @@ class Highlighter:
         """Forget stream state (new session, reattach, lost continuity)."""
         self._hold = b""
         self._in_string: Optional[bytes] = None  # terminator kind: b"osc" or b"st"
-        self._string_len = 0
         self._alt_modes: Set[bytes] = set()
         self._carry = b""
         self._ctx = b""  # plain text before the carry: lookbehind for validators
@@ -527,26 +524,15 @@ class Highlighter:
             if self._in_string:
                 end = (_OSC_END_RE if self._in_string == b"osc" else _ST_END_RE).search(buf, i)
                 if end is None:
-                    stop = n - 1 if buf.endswith((b"\x1b", b"\xc2")) else n
-                    if self._string_len + stop - i >= _STRING_MAX:
-                        stop = i + _STRING_MAX - self._string_len
-                        self._append_control(out, buf[i:stop] + b"\x18")
-                        i, self._in_string, self._string_len = stop, None, 0
-                        continue
-                    self._string_len += stop - i
-                    self._hold = buf[stop:]
-                    self._append_control(out, buf[i:stop])
+                    if buf.endswith((b"\x1b", b"\xc2")):
+                        self._hold = buf[-1:]
+                        n -= 1
+                    self._append_control(out, buf[i:n])
                     break
-                if self._string_len + end.start() - i > _STRING_MAX:
-                    stop = i + _STRING_MAX - self._string_len
-                    self._append_control(out, buf[i:stop] + b"\x18")
-                    i, self._in_string, self._string_len = stop, None, 0
-                    continue
                 stop = end.start() if end.group() == b"\x1b" else end.end()
                 self._append_control(out, buf[i:stop])
                 i = stop
                 self._in_string = None
-                self._string_len = 0
                 continue
             nxt = _NEXT_RE.search(buf, i)
             stop = n if nxt is None else nxt.start()
@@ -585,7 +571,6 @@ class Highlighter:
             m = _STRING_INTRO_RE.match(buf, i)
             if m is not None:
                 self._in_string = b"osc" if m.group(1) == b"]" or m.group(2) == b"\x9d" else b"st"
-                self._string_len = 0
             else:
                 m = _ESC_RE.match(buf, i)
                 if m is not None:

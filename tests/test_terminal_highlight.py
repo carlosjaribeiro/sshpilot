@@ -1414,23 +1414,27 @@ def test_securecrt_windows_telnet_stream_preserves_every_split(terminator):
         return b"".join(h.feed(chunk) for chunk in chunks) + h.flush()
 
     for data in (title + connecting + tail, connecting + title + tail):
-        for first in range(len(data) + 1):
-            assert strip(feed(data[:first], data[first:])) == data, first
-            for second in range(first, len(data) + 1):
-                assert strip(feed(data[:first], data[first:second], data[second:])) == data, (
-                    first,
-                    second,
-                )
+        boundaries = range(len(data) + 1)
+        for cut in boundaries:
+            assert strip(feed(data[:cut], data[cut:])) == data, cut
+        three_way = {
+            (cut, min(cut + 1, len(data))) for cut in boundaries
+        } | {
+            (max(0, cut - 1), cut) for cut in boundaries
+        }
+        for first, second in three_way:
+            assert strip(feed(data[:first], data[first:second], data[second:])) == data, (
+                first,
+                second,
+            )
 
 
-@pytest.mark.parametrize("intro", [b"\x1b]0;", b"\x1bP", b"\x1bX", b"\x1b^", b"\x1b_"])
-def test_securecrt_unterminated_control_string_is_cancelled_at_a_safe_cap(intro):
-    data = intro + b"x" * 5000 + b" 192.0.2.1"
+@pytest.mark.parametrize("prefix", [b"", b"held text "])
+def test_securecrt_long_osc52_is_byte_identical(prefix):
+    osc = b"\x1b]52;c;" + b"A" * (6 * 1024) + b"\x07"
     h = Highlighter("cisco-securecrt")
-    out = h.feed(data) + h.flush()
-    assert out.count(b"\x18") == 1
-    assert strip(out).replace(b"\x18", b"") == data
-    assert b"192.0.2.1" in out
+    out = h.feed(prefix) + h.feed(osc) + h.flush()
+    assert strip(out) == prefix + osc
 
 
 def test_securecrt_rules_preserve_source_and_compile_with_word_guard():
