@@ -21,7 +21,7 @@ except ImportError:  # Windows
 from datetime import datetime
 from typing import Optional
 from .accessibility import set_accessible_name
-from .platform_utils import is_flatpak, is_macos, is_windows
+from .platform_utils import get_data_dir, is_flatpak, is_macos, is_windows
 from .platform.process import kill_process_tree, pid_alive
 from .core.settings.defaults import DEFAULT_WHEEL_SCROLL_LINES
 from .terminal_backends import (
@@ -59,6 +59,7 @@ from .terminal_input import (
     commit_payload_to_bytes,
     sgr_reports_to_legacy,
 )
+from .terminal_session_log import build_session_logger
 from .terminal_osc52 import (
     OSC52_POLICY_ALWAYS,
     OSC52_POLICY_ASK,
@@ -349,6 +350,7 @@ class TerminalWidget(Gtk.Box):
         self._osc52_pending = None
         self._osc52_timer_id = None
         self._osc52_toast = None
+        self._session_log = None
         # PTY-less VTE cannot disconnect_pty_read() during drag-select the way
         # Ptyxis does; buffer daemon output instead (see DeferredDisplayFeed).
         self._display_feed_pause = DeferredDisplayFeed()
@@ -1691,6 +1693,8 @@ class TerminalWidget(Gtk.Box):
 
             # Keystrokes + resize via the backend abstraction (not VTE-specific).
             self._install_daemon_backend_io()
+            # After the install above, whose uninstall step closes any log.
+            self._start_session_log()
 
             return True
 
@@ -1779,8 +1783,42 @@ class TerminalWidget(Gtk.Box):
             self._on_connection_failed(str(error))
             return False
 
+    def _start_session_log(self) -> None:
+        """Open this session's transcript file when session logging is enabled."""
+        self._stop_session_log()
+
+        def _on_error(_exc):  # once per session: the logger stays off after a failure
+            self._show_toast(_("Session logging stopped: cannot write the log file"), timeout=5)
+
+        try:
+            session_log = build_session_logger(
+                self.config.get_setting,
+                lambda: os.path.join(get_data_dir(), 'logs'),
+                _on_error,
+                lambda ms, callback: GLib.timeout_add(ms, callback),
+                lambda source_id: GLib.source_remove(source_id),
+            )
+            if session_log is None:
+                return
+            conn = self.connection
+            session_log.start(
+                getattr(conn, 'nickname', None) or 'terminal',
+                getattr(conn, 'hostname', None) or '',
+            )
+            self._session_log = session_log
+        except Exception:
+            # Logging is optional; it must never fail the session itself.
+            logger.warning("Could not start session logging", exc_info=True)
+
+    def _stop_session_log(self) -> None:
+        session_log = getattr(self, '_session_log', None)
+        self._session_log = None
+        if session_log is not None:
+            session_log.close()
+
     def _uninstall_daemon_backend_io(self) -> None:
         """Drop previously installed daemon commit/size handlers (idempotent)."""
+        self._stop_session_log()
         self._uninstall_selection_feed_pause()
         backend = getattr(self, 'backend', None)
         if backend is None:
@@ -1982,6 +2020,13 @@ class TerminalWidget(Gtk.Box):
     def _on_daemon_output(self, data):
         """Handle daemon terminal output."""
         try:
+            # Raw bytes, before any painting. A replay (reattach/recovery)
+            # repeats output the log already holds, so it is not written.
+            session_log = getattr(self, '_session_log', None)
+            if session_log is not None and not getattr(
+                getattr(self, '_daemon_controller', None), 'delivering_replay', False
+            ):
+                session_log.write(data)
             self._feed_display(data)
             # After painting, so clipboard handling can never hold output up.
             scan = getattr(self, 'scan_remote_clipboard', None)
@@ -5545,6 +5590,8 @@ class TerminalWidget(Gtk.Box):
         is_quitting = bool(getattr(self, '_is_quitting', False)) or bool(
             getattr(root, '_is_quitting', False)
         )
+
+        self._stop_session_log()
 
         # Handle daemon mode close policy
         if self._daemon_mode and self._daemon_controller:

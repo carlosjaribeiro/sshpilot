@@ -17115,6 +17115,58 @@ msgstr "Durchreichen"
 msgid "Copy key to Server"
 msgstr "Schlüssel auf Server kopieren"
 
+#: src/sshpilot/preferences.py:988
+msgid "Save a plain-text transcript of every terminal session. Applies to sessions opened after the change."
+msgstr ""
+
+#: src/sshpilot/preferences.py:993 src/sshpilot/settings_index.py:131
+msgid "Log Terminal Sessions"
+msgstr ""
+
+#: src/sshpilot/preferences.py:1005
+msgid "Empty uses the sshPilot data folder (logs). An absolute path in the file name pattern overrides this folder."
+msgstr ""
+
+#: src/sshpilot/preferences.py:1011 src/sshpilot/preferences.py:1066
+msgid "Choose log folder"
+msgstr ""
+
+#: src/sshpilot/preferences.py:1022
+msgid "%S session name, %H host, %Y year, %M month, %D day, %h hour, %m minute, %s second, %% a percent sign. A / or \\ starts a subfolder."
+msgstr ""
+
+#: src/sshpilot/preferences.py:986 src/sshpilot/settings_index.py:131 src/sshpilot/settings_index.py:133 src/sshpilot/settings_index.py:135
+msgid "Session Logging"
+msgstr ""
+
+#: src/sshpilot/preferences.py:1000 src/sshpilot/settings_index.py:133
+msgid "Log folder"
+msgstr ""
+
+#: src/sshpilot/preferences.py:1017 src/sshpilot/settings_index.py:135
+msgid "File name pattern"
+msgstr ""
+
+#: src/sshpilot/preferences.py:1028
+msgid "Example: log file path"
+msgstr ""
+
+#: src/sshpilot/preferences.py:1043
+msgid "Windows drive and network paths only work on Windows; here the file goes inside the log folder."
+msgstr ""
+
+#: src/sshpilot/settings_index.py:132
+msgid "transcript;record terminal;terminal log"
+msgstr ""
+
+#: src/sshpilot/settings_index.py:134
+msgid "transcript;directory;path"
+msgstr ""
+
+#: src/sshpilot/settings_index.py:136
+msgid "transcript;filename;placeholders"
+msgstr ""
+
 #~ msgid "Connection list actions"
 #~ msgstr "Aktionen für die Verbindungsliste"
 
