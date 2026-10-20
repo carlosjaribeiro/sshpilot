@@ -5,9 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from scripts.securecrt_to_asbru import convert_sessions, main
+from scripts.securecrt_to_asbru import build_backup_manifest, convert_sessions, main
 from sshpilot.api.models.connections import AsbruImportRequest
+from sshpilot.backup_archive import read_spbk
 from sshpilot.core.connection_application_service import ConnectionApplicationService
+from sshpilot.core.connections.repository import ConnectionRepository
+from sshpilot.core.connections.ssh_config_store import SshConfigStore
 from sshpilot.core.import_export.asbru import parse_asbru_export
 from tests.helpers.fake_connection_repository import make_test_repository
 
@@ -329,3 +332,119 @@ def test_jump_port_warning_is_emitted_once_under_the_jump_name(tmp_path: Path):
     _, warnings, _ = convert_sessions(root)
 
     assert warnings == ["Jump: invalid DWORD port [SSH2] Port; using 22"]
+
+
+def test_backup_manifest_maps_telnet_serial_and_nested_groups(tmp_path: Path):
+    root = tmp_path / "Sessions"
+    _session(
+        root, "Console Port",
+        'S:"Protocol Name"=Serial\nS:"Com Port"=COM3\nD:"Baud Rate"=0001c200\n'
+        'D:"Flow Control"=00000001\nD:"Data Bits"=00000007\n'
+        'D:"Parity"=00000002\nD:"Stop Bits"=00000002\n',
+        "Lab/Racks",
+    )
+    _session(
+        root, "Legacy Switch",
+        'S:"Protocol Name"=Telnet\nS:"Hostname"=192.0.2.10\n'
+        'S:"[Telnet] Port"=2323\n',
+        "Lab",
+    )
+
+    manifest, warnings = build_backup_manifest(root)
+
+    assert not warnings
+    store = manifest["connection_store"]
+    assert manifest["backup_options"] == {
+        "app_settings": True,
+        "ssh_config": False,
+        "known_hosts": False,
+        "private_keys": False,
+        "secrets": False,
+    }
+    telnet = next(c for c in store["connections"] if c["protocol"] == "telnet")
+    serial = next(c for c in store["connections"] if c["protocol"] == "serial")
+    assert telnet["plugin_data"] == {"host": "192.0.2.10", "port": 2323}
+    assert serial["port"] == 22
+    assert serial["plugin_data"] == {
+        "device": "COM3", "baud": "115200", "flow": "hard",
+        "databits": "7", "parity": "even", "stopbits": "2",
+    }
+    assert [(g["name"], g["parent_id"], g["connection_ids"]) for g in store["groups"]] == [
+        ("Lab", None, ["Legacy-Switch"]),
+        ("Racks", "group:Lab", ["Console-Port"]),
+    ]
+
+
+def test_unknown_serial_values_warn_and_use_defaults(tmp_path: Path):
+    root = tmp_path / "Sessions"
+    _session(
+        root, "Fallback Serial",
+        'S:"Protocol Name"=Serial\nS:"Com Port"=COM3\nD:"Baud Rate"=oops\n'
+        'D:"Flow Control"=000000ff\nS:"Data Bits"=nine\n'
+        'D:"Parity"=00000004\nD:"Stop Bits"=00000001\n',
+    )
+
+    manifest, warnings = build_backup_manifest(root)
+
+    data = manifest["connection_store"]["connections"][0]["plugin_data"]
+    assert data == {
+        "device": "COM3", "baud": "38400", "flow": "hard",
+        "databits": "8", "parity": "none", "stopbits": "1",
+    }
+    assert len(warnings) == 5
+
+
+def test_generated_json_restores_telnet_and_serial_through_repository(tmp_path: Path):
+    root = tmp_path / "Sessions"
+    root.mkdir()
+    _session(
+        root, "Telnet Node",
+        'S:"Protocol Name"=Telnet\nS:"Hostname"=192.0.2.20\n'
+        'D:"[Telnet] Port"=00000017\n',
+        "Imported",
+    )
+    _session(
+        root, "Serial Node",
+        'S:"Protocol Name"=Serial\nS:"Com Port"=COM3\nS:"Baud Rate"=9600\n'
+        'S:"Flow Control"=None\nS:"Data Bits"=8\nS:"Parity"=None\nS:"Stop Bits"=1\n',
+        "Imported",
+    )
+    _session(root, "SSH Node", 'S:"Hostname"=192.0.2.40\n', "Imported")
+    expected_asbru, _, _ = convert_sessions(root)
+    asbru = tmp_path / "ssh.json"
+    backup = tmp_path / "non-ssh.json"
+    assert main([str(root), "--output", str(asbru), "--backup-output", str(backup)]) == 0
+
+    assert json.loads(asbru.read_text(encoding="utf-8")) == expected_asbru
+    manifest = json.loads(backup.read_text(encoding="utf-8"))
+    repo = ConnectionRepository(
+        ssh_store=SshConfigStore(tmp_path / "ssh_config"),
+        state_path=tmp_path / "connections.json",
+        legacy_config_path=tmp_path / "config.json",
+        isolated=False,
+    )
+    result = repo.restore_connection_store(manifest["connection_store"], mode="merge")
+
+    assert not result.warnings
+    assert {c.protocol for c in repo.snapshot().connections} == {"telnet", "serial"}
+    assert repo.get_record("Telnet-Node").data["hostname"] == "192.0.2.20"
+    assert repo.get_record("Serial-Node").data["device"] == "COM3"
+    group = repo.snapshot().groups[0]
+    assert group.name == "Imported"
+    assert set(group.connection_ids) == {"Telnet-Node", "Serial-Node"}
+
+
+def test_backup_output_spbk_is_valid_unencrypted_archive(tmp_path: Path):
+    root = tmp_path / "Sessions"
+    root.mkdir()
+    _session(
+        root, "Telnet Node",
+        'S:"Protocol Name"=Telnet\nS:"Hostname"=192.0.2.30\n',
+    )
+    asbru = tmp_path / "ssh.json"
+    backup = tmp_path / "non-ssh.spbk"
+
+    assert main([str(root), "--output", str(asbru), "--backup-output", str(backup)]) == 0
+
+    manifest = read_spbk(str(backup))
+    assert manifest["connection_store"]["connections"][0]["protocol"] == "telnet"
