@@ -214,6 +214,11 @@ work around symbol delimited words" comments and side-by-side screenshots of
 SecureCRT; VanDyke does not document how `Regex Line Mode=0` delimits words.
 Rules you write or edit yourself (custom profiles, `highlight_rules.*` files)
 match exactly as written: `err` still matches inside `error`; add `\b` yourself.
+The one exception is a rule whose pattern text is identical to one of the 51
+built-in SecureCRT patterns (an unedited duplicate, or a rule you typed or put in
+a `highlight_rules.*` file with exactly that text): it is treated as that
+built-in and also matches whole words only. Change the pattern even slightly,
+for example by adding `(?:)`, to get the as-written behaviour.
 
 Rule file format. The reference is the user's original SecureCRT export
 (`tests/data/securecrt-cisco-words.original.ini`), which holds two lists of 71
