@@ -220,6 +220,15 @@ a `highlight_rules.*` file with exactly that text): it is treated as that
 built-in and also matches whole words only. Change the pattern even slightly,
 for example by adding `(?:)`, to get the as-written behaviour.
 
+**`.*` stays inside one word (confidence medium-high).** In the same built-in
+rules (and their exact copies) every `.*` is compiled as `\S*`, so it never
+crosses a space: `snmp.*` colours `snmp-server`, not the rest of the line;
+`.*down.?` colours `down` or `%LINK-3-UPDOWN:`, not the timestamp before it;
+`.*fail.*`, `shut.*`, `password.*`, `.*-more-.*` and the others colour their
+own word. This reproduces side-by-side SecureCRT screenshots of
+`show running-config` and `show logging`; VanDyke does not document it. `.+`
+and `.?` are unchanged.
+
 Rule file format. The reference is the user's original SecureCRT export
 (`tests/data/securecrt-cisco-words.original.ini`), which holds two lists of 71
 rows: legacy `Keyword List V2` (`"regex",COLORREF,flag`) and `Keyword List V3`

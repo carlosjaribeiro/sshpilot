@@ -1315,21 +1315,22 @@ def test_securecrt_golden_screenshot_colours_follow_the_rule_file():
         (b"aaa", MISC), (b" new-model\r\n", None),
         (b"aaa", MISC), (b" authentication login default group radius ", None),
         (b"local", MISC), (b"\r\n", None),
-        # ".*thernet..." paints the whole line; the later misc "interface" wins
-        (b"interface", MISC), (b" GigabitEthernet0/10", IFACE),
+        # ".*thernet..." stays inside the interface name (".*" never crosses a space)
+        (b"interface", MISC), (b" ", None), (b"GigabitEthernet0/10", IFACE),
         (b"\r\n switchport ", None),
         (b"trunk", RED), (b" allowed ", None), (b"vlan", MISC), (b" 1-200\r\n", None),
-        (b"snmp-server community public RO", SERVICES), (b"\r\n", None),
-        (b"!", REMARK), (b"\r\n", None),
-        (b" --More-- ", RED),
-        (bs + b" " * 10 + bs + b"ip ", None), (b"name", MISC), (b"-server ", None),
+        (b"snmp-server", SERVICES), (b" community public RO\r\n", None),
+        (b"!", REMARK), (b"\r\n ", None),
+        (b"--More--", RED),
+        (b" " + bs + b" " * 10 + bs + b"ip ", None), (b"name", MISC), (b"-server ", None),
         (b"8.8.8.8", IP), (b"\r\n", None),
-        # ".*down.?" paints the line red; syslog tag and "Interface" override
-        (b"%LINK-3-UPDOWN:", SYSLOG), (b" ", RED), (b"Interface", MISC),
-        (b" GigabitEthernet0/3, changed state to down", RED), (b"\r\n", None),
-        (b"%LINEPROTO-5-UPDOWN:", SYSLOG), (b" Line ", IFACE),
-        (b"protocol", MISC), (b" ", IFACE), (b"on ", GREEN),
-        (b"Interface", MISC), (b" GigabitEthernet0/3, ", IFACE),
+        # ".*down.?" colours only the word with "down"; the syslog tag overrides it
+        (b"%LINK-3-UPDOWN:", SYSLOG), (b" ", None), (b"Interface", MISC), (b" ", None),
+        (b"GigabitEthernet0/3, ", IFACE), (b"changed state to ", None), (b"down", RED),
+        (b"\r\n", None),
+        (b"%LINEPROTO-5-UPDOWN:", SYSLOG), (b" ", None), (b"Line", IFACE), (b" ", None),
+        (b"protocol", MISC), (b" ", None), (b"on ", GREEN),
+        (b"Interface", MISC), (b" ", None), (b"GigabitEthernet0/3, ", IFACE),
         (b"changed state to ", None), (b"up", GREEN), (b"\r\n", None),
         (b"%SW_MATM-4-MACFLAP_NOTIF:", SYSLOG), (b" Host ", None),
         (b"ec8e.7717.60c9", MAC), (b" in ", None), (b"vlan", MISC),
@@ -1429,7 +1430,7 @@ def test_securecrt_unfinished_line_waits_for_idle_or_prompt():
     now[0] += 0.01
     assert h.flush_due() == b""
     now[0] += 0.04
-    assert h.flush_due() == truecolour(b" --More-- ", RED)
+    assert h.flush_due() == b" " + truecolour(b"--More--", RED) + b" "
     assert not h.pending and h.flush_due() == b""
     # The rest of the line is coloured with the shown part as context.
     assert h.feed(b"\x08\x08x\r\n") == b"\x08\x08x\r\n"
@@ -1467,7 +1468,7 @@ def test_securecrt_line_cap_bounds_worst_case_cost():
 
 @pytest.mark.parametrize("length", [300, 4000])
 def test_securecrt_long_line_is_matched_whole(length):
-    line = b"x" * (length - 5) + b" down"
+    line = b"x" * (length - 4) + b"down"  # one word: ".*down.?" spans the whole line
     assert run("cisco-securecrt", line + b"\r\n") == truecolour(line, RED) + b"\r\n"
 
 
@@ -1475,9 +1476,9 @@ def test_securecrt_line_over_the_cap_falls_back_to_pieces():
     from sshpilot.terminal_highlight import LINE_MAX
 
     # The cut piece is matched as its own line: ".*down.?" stops at the cut.
-    out = run("cisco-securecrt", b"x" * (LINE_MAX - 4) + b" down down\r\n")
+    out = run("cisco-securecrt", b"x" * (LINE_MAX - 3) + b"down down\r\n")
     assert _runs(out) == [
-        (b"x" * (LINE_MAX - 4) + b" dow", None), (b"n down", RED), (b"\r\n", None),
+        (b"x" * (LINE_MAX - 3) + b"down ", None), (b"down", RED), (b"\r\n", None),
     ]
 
 
@@ -1486,10 +1487,10 @@ def test_securecrt_long_digit_run_is_matched_in_pieces():
 
     digits = b"1" * DIGIT_RUN_MAX
     # Whole-line ".*down.?" would cover the digits; pieces keep the cost bounded.
-    out = run("cisco-securecrt", digits + b"1 down\r\n")
-    assert _runs(out) == [(digits, None), (b"1 down", RED), (b"\r\n", None)]
-    out = run("cisco-securecrt", digits + b" down\r\n")
-    assert _runs(out) == [(digits + b" down", RED), (b"\r\n", None)]
+    out = run("cisco-securecrt", digits + b"1down\r\n")
+    assert _runs(out) == [(digits, None), (b"1down", RED), (b"\r\n", None)]
+    out = run("cisco-securecrt", digits + b"down\r\n")
+    assert _runs(out) == [(digits + b"down", RED), (b"\r\n", None)]
 
 
 def test_securecrt_v3_flags_and_bold_rows():
@@ -1523,5 +1524,76 @@ def test_paint_display_schedules_idle_flush_for_held_line(monkeypatch):
     assert fed == [b"", b""] and len(timers) == 1 and timers[0][0] == 50
     now[0] = 0.06
     assert timers[0][1]() is False
-    assert fed[-1] == truecolour(b"Password: x", SECRET)
+    assert fed[-1] == truecolour(b"Password:", SECRET) + b" x"
     assert widget._highlight_timer_id is None
+
+
+# ".*" in a built-in rule stays inside one word, as in SecureCRT: "snmp.*" colours
+# "snmp-server", ".*down.?" colours "down", never the rest (or start) of the line.
+WORD_DOT_STAR = [
+    (b"snmp-server enable traps ospf cisco-specific errors", [
+        (b"snmp-server", SERVICES), (b" enable traps ", None), (b"ospf", SERVICES),
+        (b" cisco-specific errors", None)]),
+    (b"snmp-server enable traps dot1x auth-fail-vlan guest-vlan no-auth-fail-vlan no-guest-vlan", [
+        (b"snmp-server", SERVICES), (b" enable traps dot1x ", None), (b"auth-fail-", RED),
+        (b"vlan", MISC), (b" guest-", None), (b"vlan", MISC), (b" ", None),
+        (b"no-auth-fail-", RED), (b"vlan", MISC), (b" ", None), (b"no", RED),
+        (b"-guest-", None), (b"vlan", MISC)]),
+    (b"snmp-server host 192.0.2.1 version 3 priv user1", [
+        (b"snmp-server", SERVICES), (b" host ", None), (b"192.0.2.1", IP), (b" ", None),
+        (b"version", MISC), (b" 3 priv user1", None)]),
+    (b"snmp-server community X RO", [(b"snmp-server", SERVICES), (b" community X RO", None)]),
+    (b"ntp clock-period 36028811", [(b"ntp", SERVICES), (b" clock-period 36028811", None)]),
+    (b"ntp server 192.0.2.1", [(b"ntp", SERVICES), (b" server ", None), (b"192.0.2.1", IP)]),
+    (b"ntp authentication-key 1 md5 X 7", [
+        (b"ntp", SERVICES), (b" ", None), (b"authentication-key", SECRET),
+        (b" 1 md5 X 7", None)]),
+    (b"banner login ^C", [(b"banner login ^C", None)]),
+    (b"Sep 22 14:13:46.112: %LINK-3-UPDOWN: Interface GigabitEthernet0/3, changed state to down", [
+        (b"Sep 22 14:13:46.112: ", None), (b"%LINK-3-UPDOWN:", SYSLOG), (b" ", None),
+        (b"Interface", MISC), (b" ", None), (b"GigabitEthernet0/3, ", IFACE),
+        (b"changed state to ", None), (b"down", RED)]),
+    (b"Sep 22 14:13:49.703: %LINK-3-UPDOWN: Interface GigabitEthernet0/3, changed state to up", [
+        (b"Sep 22 14:13:49.703: ", None), (b"%LINK-3-UPDOWN:", SYSLOG), (b" ", None),
+        (b"Interface", MISC), (b" ", None), (b"GigabitEthernet0/3, ", IFACE),
+        (b"changed state to ", None), (b"up", GREEN)]),
+    (b"Sep 22 14:13:50.709: %LINEPROTO-5-UPDOWN: Line protocol on Interface "
+     b"GigabitEthernet0/3, changed state to up", [
+        (b"Sep 22 14:13:50.709: ", None), (b"%LINEPROTO-5-UPDOWN:", SYSLOG), (b" ", None),
+        (b"Line", IFACE), (b" ", None), (b"protocol", MISC), (b" ", None), (b"on ", GREEN),
+        (b"Interface", MISC), (b" ", None), (b"GigabitEthernet0/3, ", IFACE),
+        (b"changed state to ", None), (b"up", GREEN)]),
+    (b"Oct 13 10:06:44.546: %SW_MATM-4-MACFLAP_NOTIF: Host ec8e.7717.60c9 in vlan 668 "
+     b"is flapping between port Gi0/10 and port Gi0/28", [
+        (b"Oct 13 10:06:44.546: ", None), (b"%SW_MATM-4-MACFLAP_NOTIF:", SYSLOG),
+        (b" Host ", None), (b"ec8e.7717.60c9", MAC), (b" in ", None), (b"vlan", MISC),
+        (b" 668 is flapping between ", None), (b"port", MISC), (b" ", None),
+        (b"Gi0/10 ", IFACE), (b"and ", None), (b"port", MISC), (b" ", None),
+        (b"Gi0/28", IFACE)]),
+    (b"Oct 19 16:48:27.889: SSH2 2: no matching mac found: client "
+     b"umac-64-etm@openssh.com,hmac-sha2-", [
+        (b"Oct 19 16:48:27.889: SSH2 2: ", None), (b"no", RED),
+        (b" matching mac found: client umac-64-etm@openssh.com,hmac-sha2-", None)]),
+    (b"Sep 22 14:50:09.725: %SYS-5-CONFIG_I: Configured from console by user on vty1 "
+     b"(192.0.2.49)", [
+        (b"Sep 22 14:50:09.725: ", None), (b"%SYS-5-CONFIG_I:", SYSLOG),
+        (b" Configured from ", None), (b"console", IFACE), (b" by user ", None),
+        (b"on ", GREEN), (b"vty1 (", None), (b"192.0.2.49", IP), (b")", None)]),
+]
+
+
+@pytest.mark.parametrize("line, runs", WORD_DOT_STAR, ids=[line[:40].decode() for line, _ in WORD_DOT_STAR])
+def test_securecrt_dot_star_stays_inside_one_word(line, runs):
+    data = line + b"\r\n"
+    expected = runs + [(b"\r\n", None)] if runs[-1][1] else runs[:-1] + [(runs[-1][0] + b"\r\n", None)]
+    assert _runs(run("cisco-securecrt", data)) == expected
+    for cut in range(1, len(data)):  # every chunk boundary
+        assert _runs(run("cisco-securecrt", data[:cut], data[cut:])) == expected, cut
+    assert _runs(run("cisco-securecrt", *(data[i:i + 1] for i in range(len(data))))) == expected
+
+
+def test_securecrt_wrapped_line_does_not_recolour_the_previous_line():
+    first = b"Sep 22 14:13:46.112: %LINK-3-UPDOWN: Interface GigabitEthernet0/3, changed state to dow"
+    alone = run("cisco-securecrt", first + b"\r\n")
+    assert RED not in [colour for _, colour in _runs(alone)]
+    assert run("cisco-securecrt", first + b"\r\n", b"n\r\n") == alone + b"n\r\n"
