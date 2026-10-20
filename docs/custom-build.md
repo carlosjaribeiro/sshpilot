@@ -12,10 +12,12 @@
 
 ## Install
 
+Replace `<your-github-owner>` in the clone URL with the repository owner's GitHub handle.
+
 Windows (PowerShell):
 
 ```powershell
-git clone https://github.com/carlosjaribeiro/sshpilot.git
+git clone https://github.com/<your-github-owner>/sshpilot.git
 cd sshpilot
 git checkout carlos-custom
 powershell -ExecutionPolicy Bypass -File scripts\setup-windows.ps1
@@ -25,7 +27,7 @@ powershell -ExecutionPolicy Bypass -File scripts\run-windows.ps1
 Linux:
 
 ```sh
-git clone https://github.com/carlosjaribeiro/sshpilot.git
+git clone https://github.com/<your-github-owner>/sshpilot.git
 cd sshpilot
 git checkout carlos-custom
 scripts/install-run-linux.sh

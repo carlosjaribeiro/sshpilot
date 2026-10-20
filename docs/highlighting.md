@@ -10,9 +10,10 @@ Profiles:
 
 - **Generic**, **Cisco IOS**, **Junos**, and **Huawei VRP** retain their original
   terminal-palette colours.
-- **Cisco (SecureCRT-style)** runs all 51 non-comment rules of the supplied
-  SecureCRT V3 `Cisco Words` list **verbatim**, in file order, on each complete
-  line; later rules win on overlap. As in the source list
+- **Cisco (SecureCRT-style)** preserves all 51 non-comment rules of the supplied
+  SecureCRT V3 `Cisco Words` list as source text and in file order. Built-ins
+  compile with a whole-word guard, and each `.*` is bounded to one
+  non-whitespace word; later rules win on overlap. As in the source list
   (`D:"Match Case"=00000000`), every rule is case-insensitive. See
   [SecureCRT line engine](#securecrt-line-engine).
 - **Custom profiles** are your own copies of any of the above, listed after the
@@ -78,8 +79,8 @@ The **Live Preview** paints sample `show ip interface brief`, `show running-conf
 and syslog lines with the rules being edited (the theme editor: with the
 selected profile), on the current terminal colours. Paste a line of your own
 into **Test text** to see it on top. A copy of *Cisco (SecureCRT-style)* paints
-exactly like the built-in, including the verbatim source rules that colour
-parts of words (`h` in `GigabitEthernet`, `as` in `unassigned`; see the
+exactly like the built-in, including its adapted rules that colour parts of
+words (`h` in `GigabitEthernet`, `as` in `unassigned`; see the
 deviations table below).
 
 Validation happens while you type and before anything is written: a rule must
@@ -170,9 +171,9 @@ The second field is a documented role or `#RRGGBB`; the optional third field is
 COLORREF values are converted on load and `[*]` section rows are skipped.
 Rules are case-insensitive unless the file contains `D:"Match Case"=00000001`.
 
-Custom patterns (other than the 51 built-in source expressions, which are
-recognised and run verbatim) must fit a small allowlist, checked token by
-token:
+Custom patterns identical to one of the 51 built-in source expressions use the
+same whole-word and bounded-`.*` adaptations as built-ins. Other custom patterns
+are run as written and must fit a small allowlist, checked token by token:
 
 - literals, escaped characters, `\xHH`, character classes, `.`, `\d \w \s`
   (and their negations), `\b \B`, groups `(…)`/`(?:…)` and `|`;
@@ -191,16 +192,16 @@ still apply.
 
 ## SecureCRT line engine
 
-The profile holds each line of output until it ends, then applies every rule
-to the line, exactly as written in the file (only `re.IGNORECASE`), in file
-order, each rule painting all its matches over the earlier ones. Output is
-therefore the same however the stream is split into chunks. Every line of up
-to 4096 bytes is matched whole (the two exceptions are under **Line cap**), so
-`.*thernet…`, `.*down.?`, `.*-more-.*`, `snmp.*`, the `^` prompt rules and `$`
-behave as in SecureCRT. Visible bytes never change.
+The profile holds each line of output until it ends, then applies the built-in
+rules in file order, each painting all its matches over earlier ones. Output
+is therefore the same however the stream is split into chunks. Built-ins use
+`re.IGNORECASE`, a whole-word guard, and `\S*` in place of each `.*`, keeping
+those wildcards inside one non-whitespace word. Every line of up to 4096 bytes
+is matched whole (the two exceptions are under **Line cap**). Visible bytes
+never change.
 
 **Whole words (a deliberate adaptation, confidence medium).** SecureCRT's
-rules are not matched as raw substrings: with the verbatim regexes, `H`, `V`,
+rules are not matched as raw substrings: without the whole-word guard, `H`, `V`,
 `des` or `on` would colour letters inside `dhcp`, `server` or `authorization`,
 which SecureCRT does not do. So the 51 built-in rules (and exact, unedited
 copies of them in a custom profile, so *Duplicate* equals the original) are
@@ -208,7 +209,10 @@ matched on whole words: when a match's first (last) character is a letter,
 digit or `_`, the character before (after) it must not be one. Symbol edges
 (`#`, `.`, `,`) are exempt, so the prompt `SW#show` and `bits/sec,` still match.
 It is a lookaround added when compiling (`whole_word`), not a post-filter, so a
-rule can still backtrack to an alternative that fits. `_` counts as a word
+rule can still backtrack to an alternative that fits. In built-in patterns,
+each `.*` is also changed to `\S*` before compilation so it cannot cross
+whitespace. This is a known adaptation: a pattern like `.*'.*` colours only a
+single quoted token, not a multi-word quoted phrase. `_` counts as a word
 character, so `ISE_RADIUS` stays one word. Evidence: the list's "gray keywords
 work around symbol delimited words" comments and side-by-side screenshots of
 SecureCRT; VanDyke does not document how `Regex Line Mode=0` delimits words.
@@ -272,9 +276,9 @@ other 51 rows, 50 are enabled and loaded; the disabled final
     pieces, because `\d*\d*\.\d*\(` is cubic in the run length (21 s for 4096
     digits whole, about 7 ms per piece).
 
-  The worst case left is a hostile 4096-byte line: about 0.25 s for the
-  quadratic `.*X` rules, and about 0.7 s for `%.+-[0-9]-.+:` on `%-1-%-1-…`
-  with no `:`.
+  The worst case left is a hostile 4096-byte line: about 0.7 s for
+  `%.+-[0-9]-.+:` on `%-1-%-1-…` with no `:`. The `.*` wildcards are bounded to
+  one non-whitespace word.
 - **Remote styling:** escape sequences keep their position in the line. Text
   the remote coloured (foreground/background, reverse, conceal) still counts
   for matching but is never painted; alternate-screen programs (vim, less,

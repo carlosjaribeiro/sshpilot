@@ -1,12 +1,10 @@
 """SecureCRT-compatible Cisco keyword rules, themes, and custom-rule loading.
 
-The 51 entries in :data:`SECURECRT_RULES` are the non-label rules of
-SecureCRT's ``Cisco Words`` list, verbatim and in source order. They run
-case-insensitively (``Match Case`` off) on one complete line at a time, so
-``^``/``$`` mean line start/end; later rules override earlier ones. The line
-length cap in :mod:`terminal_highlight` bounds their cost. Custom rules must
-fit a small tokenised allowlist (:func:`_safe_custom_pattern`). See
-``docs/highlighting.md``.
+The 51 entries in :data:`SECURECRT_RULES` preserve the non-label rules of
+SecureCRT's ``Cisco Words`` list as source text and in source order. Built-ins
+run case-insensitively (``Match Case`` off) with a whole-word guard; each
+``.*`` is bounded to one non-whitespace word. Custom rules must fit a small
+tokenised allowlist (:func:`_safe_custom_pattern`). See ``docs/highlighting.md``.
 """
 
 from __future__ import annotations

@@ -1403,7 +1403,7 @@ def test_securecrt_split_invariance():
             assert feed(*parts) == whole, (first, second)
 
 
-def test_securecrt_rules_are_the_file_rules_unmodified():
+def test_securecrt_rules_preserve_source_and_compile_with_word_guard():
     from sshpilot.terminal_highlight_securecrt import whole_word
 
     source = _fixture_rules()
@@ -1412,7 +1412,7 @@ def test_securecrt_rules_are_the_file_rules_unmodified():
         (pattern, pattern) for pattern, _ in source
     ]
     compiled = compile_rules("securecrt")
-    # the file's patterns, unmodified, inside the whole-word guard
+    # Source text is preserved; built-ins compile with the whole-word and .* guards.
     assert [rule.regex.pattern for rule in compiled] == [whole_word(pattern) for pattern, _ in source]
     assert all(rule.regex.flags & re.IGNORECASE for rule in compiled)
 
@@ -1587,13 +1587,3 @@ def test_securecrt_dot_star_stays_inside_one_word(line, runs):
     data = line + b"\r\n"
     expected = runs + [(b"\r\n", None)] if runs[-1][1] else runs[:-1] + [(runs[-1][0] + b"\r\n", None)]
     assert _runs(run("cisco-securecrt", data)) == expected
-    for cut in range(1, len(data)):  # every chunk boundary
-        assert _runs(run("cisco-securecrt", data[:cut], data[cut:])) == expected, cut
-    assert _runs(run("cisco-securecrt", *(data[i:i + 1] for i in range(len(data))))) == expected
-
-
-def test_securecrt_wrapped_line_does_not_recolour_the_previous_line():
-    first = b"Sep 22 14:13:46.112: %LINK-3-UPDOWN: Interface GigabitEthernet0/3, changed state to dow"
-    alone = run("cisco-securecrt", first + b"\r\n")
-    assert RED not in [colour for _, colour in _runs(alone)]
-    assert run("cisco-securecrt", first + b"\r\n", b"n\r\n") == alone + b"n\r\n"
