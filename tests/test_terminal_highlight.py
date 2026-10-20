@@ -1403,6 +1403,36 @@ def test_securecrt_split_invariance():
             assert feed(*parts) == whole, (first, second)
 
 
+@pytest.mark.parametrize("terminator", [b"\x07", b"\x1b\\"])
+def test_securecrt_windows_telnet_stream_preserves_every_split(terminator):
+    title = b"\x1b]0;Telnet device.example" + terminator
+    connecting = b"Connecting To device.example..."
+    tail = b"\x1b[2J\x1b[H\x1b[?25h\xff\xfb\x01\r\x00Banner\r\nUsername:"
+
+    def feed(*chunks):
+        h = Highlighter("cisco-securecrt")
+        return b"".join(h.feed(chunk) for chunk in chunks) + h.flush()
+
+    for data in (title + connecting + tail, connecting + title + tail):
+        for first in range(len(data) + 1):
+            assert strip(feed(data[:first], data[first:])) == data, first
+            for second in range(first, len(data) + 1):
+                assert strip(feed(data[:first], data[first:second], data[second:])) == data, (
+                    first,
+                    second,
+                )
+
+
+@pytest.mark.parametrize("intro", [b"\x1b]0;", b"\x1bP", b"\x1bX", b"\x1b^", b"\x1b_"])
+def test_securecrt_unterminated_control_string_is_cancelled_at_a_safe_cap(intro):
+    data = intro + b"x" * 5000 + b" 192.0.2.1"
+    h = Highlighter("cisco-securecrt")
+    out = h.feed(data) + h.flush()
+    assert out.count(b"\x18") == 1
+    assert strip(out).replace(b"\x18", b"") == data
+    assert b"192.0.2.1" in out
+
+
 def test_securecrt_rules_preserve_source_and_compile_with_word_guard():
     from sshpilot.terminal_highlight_securecrt import whole_word
 
@@ -1526,6 +1556,34 @@ def test_paint_display_schedules_idle_flush_for_held_line(monkeypatch):
     assert timers[0][1]() is False
     assert fed[-1] == truecolour(b"Password:", SECRET) + b" x"
     assert widget._highlight_timer_id is None
+
+
+def test_daemon_telnet_prompt_flushes_after_osc_and_csi_without_more_output(monkeypatch):
+    import types
+
+    import sshpilot.terminal as terminal_mod
+
+    timers = []
+    monkeypatch.setattr(
+        terminal_mod.GLib, "timeout_add", lambda ms, callback: timers.append(callback) or 7
+    )
+    now = [0.0]
+    fed = []
+    widget = types.SimpleNamespace(
+        backend=types.SimpleNamespace(feed=fed.append),
+        _highlighter=Highlighter("cisco-securecrt", clock=lambda: now[0]),
+        _mouse_tracking=None,
+    )
+    widget._on_highlight_flush = terminal_mod.TerminalWidget._on_highlight_flush.__get__(widget)
+    data = (
+        b"Connecting To device.example...\x1b]0;Telnet device.example\x07"
+        b"\x1b[2J\x1b[H\x1b[?25hUsername:"
+    )
+    terminal_mod.TerminalWidget._paint_display(widget, data)
+    assert fed == [b""] and len(timers) == 1
+    now[0] = 0.06
+    assert timers[0]() is False
+    assert strip(b"".join(fed)) == data
 
 
 # ".*" in a built-in rule stays inside one word, as in SecureCRT: "snmp.*" colours
