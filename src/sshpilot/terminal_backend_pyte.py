@@ -92,14 +92,38 @@ def create_terminal_model(preferred: Optional[str], columns: int, lines: int, on
 
 
 def daemon_output_is_rendered() -> bool:
-    """True when daemon session output was already rendered by ConPTY.
+    """True when daemon session output went through ConPTY.
 
     The daemon is always local (a Unix socket, or loopback TCP on Windows) and
-    ``daemon/server.py`` runs sessions under ConPTY on Windows. conhost then
-    sends repaints of its own screen rather than the remote's raw stream.
+    ``daemon/server.py`` runs sessions under ConPTY on Windows. conhost keeps
+    its own top-anchored buffer there; whether it also repaints it after a
+    resize is :func:`conpty_passes_through`.
     """
 
     return sys.platform == "win32"
+
+
+def conpty_passes_through() -> bool:
+    """True when ConPTY here is Microsoft's bundled conpty.dll.
+
+    It relays a VT client's bytes (ssh.exe) and sends nothing after a resize
+    but a cursor query, so the model keeps owning its screen. The inbox
+    console (kernel32, and pywinpty) repaints its viewport instead
+    (terminal-reflow.md). The local daemon resolves the same DLL.
+    """
+
+    if sys.platform != "win32":
+        return False
+    # daemon/conpty_runner.py: CONPTY_BACKEND_ENV
+    if (os.environ.get("SSHPILOT_CONPTY_BACKEND") or "").strip().lower() in ("pywinpty", "winpty"):
+        return False
+    try:
+        from .platform.windows.conpty import default_api
+
+        return default_api().source != "kernel32"
+    except Exception:  # noqa: BLE001 - the old, conservative behaviour
+        logger.debug("Could not resolve the ConPTY DLL", exc_info=True)
+        return False
 
 
 def _any_model_importable() -> bool:
@@ -1076,9 +1100,8 @@ class PyteTerminalBackend:
             on_exit=lambda status: GLib.idle_add(self._on_local_exit, process, status),
         )
         if daemon_output_is_rendered():
-            # ConPTY repaints its viewport after a resize, as for daemon
-            # sessions: pulling history back on a grow would be painted over.
-            view.model.pull_history_on_grow = False
+            # ConPTY keeps a top-anchored viewport, as for daemon sessions.
+            self._follow_conpty()
         try:
             pid = process.start(
                 list(argv or ()),
@@ -1170,14 +1193,36 @@ class PyteTerminalBackend:
     def prepare_pty_less_emulation(self) -> None:
         """Adapt the model to the daemon's stream (called on daemon paths only).
 
-        After a resize conhost repaints its viewport from the top, so rows
-        the model pulled back from the scrollback on a grow would be painted
-        over and drop out of the transcript. Under ConPTY the model leaves
-        history alone and adds the new rows at the bottom. A raw stream (the
-        POSIX daemon) keeps the xterm-like pull.
+        conhost keeps a top-anchored viewport, so rows the model pulled back
+        from the scrollback on a grow would be painted over (inbox console)
+        or sit above the rows a console client addresses. Under ConPTY the
+        model leaves history alone and adds the new rows at the bottom
+        (:meth:`_follow_conpty`). A raw stream (the POSIX daemon) keeps the
+        xterm-like pull.
         """
 
-        self.view.model.pull_history_on_grow = not daemon_output_is_rendered()
+        if daemon_output_is_rendered():
+            self._follow_conpty()
+        else:
+            self.view.model.pull_history_on_grow = True
+
+    def _follow_conpty(self) -> None:
+        """Model settings for a stream that went through ConPTY.
+
+        No history is pulled back on a grow: conhost would paint over it, or
+        address rows below it. ``terminal.reflow_visible_screen`` (default on)
+        lets a passthrough conpty.dll session reflow its visible screen; the
+        libvterm model ignores that.
+        """
+
+        model = self.view.model
+        model.pull_history_on_grow = False
+        config = getattr(self.owner, "config", None)
+        try:
+            wanted = bool(config.get_setting("terminal.reflow_visible_screen", True)) if config else True
+        except Exception:  # noqa: BLE001
+            wanted = True
+        model.passthrough = wanted and conpty_passes_through()
 
     def get_pty(self) -> Optional[Any]:
         return None

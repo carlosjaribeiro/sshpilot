@@ -58,6 +58,35 @@ def test_daemon_sessions_pull_history_on_grow_only_without_conpty(model, platfor
     assert backend.view.model.pull_history_on_grow is pulls
 
 
+@pytest.mark.parametrize(
+    "source, backend_env, setting, passthrough",
+    [
+        (r"C:\sshpilot\conpty.dll", "", True, True),
+        ("kernel32", "", True, False),
+        (r"C:\sshpilot\conpty.dll", "pywinpty", True, False),
+        (r"C:\sshpilot\conpty.dll", "", False, False),
+    ],
+)
+def test_only_a_passthrough_conpty_lets_the_model_reflow_its_screen(
+    source, backend_env, setting, passthrough, monkeypatch
+):
+    import types
+
+    from sshpilot import terminal_backend_pyte
+    from sshpilot.platform.windows import conpty
+
+    monkeypatch.setenv("SSHPILOT_TERMINAL_MODEL", "pyte")
+    monkeypatch.setenv("SSHPILOT_CONPTY_BACKEND", backend_env)
+    settings = {"terminal.reflow_visible_screen": setting}
+    config = types.SimpleNamespace(get_setting=lambda key, default=None: settings.get(key, default))
+    backend = terminal_backend_pyte.PyteTerminalBackend(types.SimpleNamespace(config=config))
+    monkeypatch.setattr(terminal_backend_pyte.sys, "platform", "win32")
+    monkeypatch.setattr(conpty, "default_api", lambda: types.SimpleNamespace(source=source))
+    backend.prepare_pty_less_emulation()
+    assert backend.view.model.pull_history_on_grow is False
+    assert backend.view.model.passthrough is passthrough
+
+
 @pytest.mark.parametrize("model", ["pyte", "vterm"])
 def test_synchronized_update_holds_the_repaint(model, monkeypatch):
     monkeypatch.setenv("SSHPILOT_TERMINAL_MODEL", model)

@@ -364,3 +364,113 @@ def test_scroll_region_line_edits_with_a_top_margin():
     model.feed(b"head\r\nmid\r\n" + LONG.encode() + b"\x1b[2;4r\x1b[2;1H\x1b[M")
     model.resize(80, 5)
     assert _rows(model) == ["head", LONG]
+
+
+# -- the bundled conpty.dll (passthrough) ------------------------------------
+#
+# Recorded from Microsoft.Windows.Console.ConPTY 1.25 on Windows 11 with a fake
+# Cisco CLI, wsl.exe running bash, and cmd.exe: it relays a VT client's bytes
+# unchanged and sends nothing on a resize. When the client asks for the cursor
+# it sends ESC[6n and, after the reply, a CUP to the reported position.
+
+CONPTY_START = b"\x1b[1t\x1b[c\x1b[?1004h\x1b[?9001h"
+
+
+def _passthrough(columns, lines):
+    replies = []
+    model = TerminalModel(columns, lines, on_reply=replies.append)
+    model.pull_history_on_grow = False
+    model.passthrough = True
+    return model, replies
+
+
+def _cursor(model):
+    return model.screen.cursor.y, model.screen.cursor.x
+
+
+def test_passthrough_narrowing_rewraps_the_screen_instead_of_cutting_it():
+    model, _ = _passthrough(80, 6)
+    model.feed(CONPTY_START + b"banner\r\n" + LONG.encode() + b"\r\nshort\r\nSW1#")
+    model.resize(40, 6)
+    assert _rows(model) == ["banner", LONG[:40], LONG[40:], "short", "SW1#"]
+    assert _cursor(model) == (4, 4)
+
+
+def test_passthrough_widening_joins_rows_wrapped_on_screen():
+    model, _ = _passthrough(40, 6)
+    model.feed(b"banner\r\n" + LONG.encode() + b"\r\nSW1#")
+    model.resize(80, 6)
+    assert _rows(model) == ["banner", LONG, "SW1#"]
+    assert _cursor(model) == (2, 4)
+
+
+def test_passthrough_cursor_sync_after_a_resize_moves_nothing():
+    model, replies = _passthrough(40, 6)
+    model.feed(b"x\r\n" + LONG.encode() + b"\r\n$")
+    model.resize(80, 6)
+    model.feed(b"\x1b[6n\r\x1b[K\r$")  # ConPTY's query, then bash's SIGWINCH redraw
+    assert replies[-1] == b"\x1b[3;2R"
+    model.feed(b"\x1b[3;2H")  # ConPTY moves to the position it was told
+    model.feed(b"ls\r\nfile\r\n$")
+    assert _rows(model) == ["x", LONG, "$ls", "file", "$"]
+
+
+def test_passthrough_output_after_a_reflow_scrolls_without_duplicates():
+    model, _ = _passthrough(40, 4)
+    model.feed(LONG.encode() + b"\r\n$")
+    model.resize(20, 4)
+    assert _rows(model) == [LONG[:20], LONG[20:40], LONG[40:], "$"]
+    lines = [b"line%d" % number for number in range(6)]
+    model.feed(b"\r\n" + b"\r\n".join(lines) + b"\r\n$")
+    expected_tail = [line.decode() for line in lines] + ["$"]
+    assert _rows(model) == [LONG[:20], LONG[20:40], LONG[40:], "$"] + expected_tail
+    model.resize(60, 4)
+    assert _rows(model) == [LONG, "$"] + expected_tail
+
+
+def test_typing_at_the_prompt_after_a_passthrough_reflow():
+    model, _ = _passthrough(40, 5)
+    model.feed(LONG.encode() + b"\r\nSW1#")
+    model.resize(80, 5)
+    model.feed(b"sh ruX")  # the remote echoes
+    model.resize(30, 5)
+    model.feed(b"\x08 \x08n")
+    assert _rows(model) == [LONG[:30], LONG[30:], "SW1#sh run"]
+    assert _cursor(model) == (2, 10)
+
+
+def test_passthrough_widening_keeps_history_where_conhost_keeps_it():
+    # cmd.exe writes through console APIs, so conhost positions its output in
+    # its own buffer, which it reflows without pulling history back down.
+    title = b"\x1b]0;C:\\Windows\\System32\\cmd.exe\x1b\\"
+    a90 = b"A" * 90
+    model, replies = _passthrough(100, 8)
+    model.feed(CONPTY_START + b"\x1b[?7l\x1b[?7h" + title + b"\r\n>")
+    model.feed(b"\x1b[2;2Hecho " + a90 + b"\x1b[2;97H\x1b[2;97H\r\n" + title + a90 + b"\r\n" + title + b"\r\n>")
+    model.resize(40, 8)
+    model.feed(b"\x1b[8;2Hecho x\x1b[8;8H\x1b[8;8H\r\n" + title + b"x\r\n" + title + b"\r\n>\x1b[6n")
+    assert replies[-1] == b"\x1b[8;2R"
+    model.feed(b"\x1b[8;2H")
+    model.resize(100, 8)
+    model.feed(b"\x1b[6;2Hecho y\x1b[6;8H\x1b[6;8H\r\n" + title + b"y\r\n" + title + b"\r\n>\x1b[6n")
+    assert replies[-1] == b"\x1b[8;2R"
+    assert _rows(model) == ["", ">echo " + "A" * 90, "A" * 90, "", ">echo x", "x", "", ">echo y", "y", "", ">"]
+
+
+def test_passthrough_main_screen_is_reflowed_after_the_alternate_screen():
+    model, _ = _passthrough(80, 6)
+    model.feed(b"banner\r\n" + LONG.encode() + b"\r\nSW1#")
+    model.feed(b"\x1b[?1049h\x1b[H\x1b[2JALT TOP\x1b[5;3Hmid")
+    model.resize(40, 6)
+    assert model.row_text(model.history_length).rstrip() == "ALT TOP"  # not reflowed
+    model.feed(b"\x1b[?1049l")
+    assert _rows(model) == ["banner", LONG[:40], LONG[40:], "SW1#"]
+    assert _cursor(model) == (3, 4)
+
+
+def test_inbox_conhost_still_keeps_its_screen():
+    model = TerminalModel(80, 6)
+    model.pull_history_on_grow = False  # passthrough stays off: conhost repaints
+    model.feed(LONG.encode() + b"\r\n$")
+    model.resize(40, 6)
+    assert _rows(model) == [LONG[:40], "$"]

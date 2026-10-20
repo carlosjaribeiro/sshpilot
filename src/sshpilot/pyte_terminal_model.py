@@ -170,9 +170,13 @@ class EmulatorScreen(pyte.Screen):
         #: top-anchored viewport after a resize (ConPTY), where the pulled
         #: rows would be painted over and lost.
         self.pull_history_on_grow = True
+        #: With ``pull_history_on_grow`` off: the console passes the stream
+        #: through and sends nothing after a resize (the bundled conpty.dll),
+        #: so the model still owns its screen. Off: conhost repaints it.
+        self.passthrough = False
         #: Rewrap soft-wrapped lines when the width changes: always in the
-        #: scrollback, on the screen only where ``pull_history_on_grow`` says
-        #: the model owns it (not ConPTY) and never on the alternate screen.
+        #: scrollback, on the screen only where the model owns it (not under
+        #: a repainting conhost) and never on the alternate screen.
         self.reflow = True
         self._drawing = False
         self._draw_end = None
@@ -190,6 +194,10 @@ class EmulatorScreen(pyte.Screen):
     def alternate_active(self) -> bool:
         return self._main_buffer is not None
 
+    @property
+    def _owns_screen(self) -> bool:
+        return self.pull_history_on_grow or self.passthrough
+
     def _push_scrollback(self, line: Line) -> None:
         if self.scrollback.maxlen == 0 or self.alternate_active:
             return
@@ -204,7 +212,7 @@ class EmulatorScreen(pyte.Screen):
     # -- pyte event overrides ------------------------------------------------
 
     def draw(self, data: str) -> None:
-        if not self.pull_history_on_grow and (self.cursor.y, self.cursor.x) != self._draw_end:
+        if not self._owns_screen and (self.cursor.y, self.cursor.x) != self._draw_end:
             # Text that does not continue where the last text ended is a
             # ConPTY repaint of the row with whatever its own buffer holds:
             # it neither continues the row above nor is continued below.
@@ -369,7 +377,7 @@ class EmulatorScreen(pyte.Screen):
             return
 
         reflow = self.reflow and columns != self.columns
-        if self.reflow and self.pull_history_on_grow:
+        if self.reflow and self._owns_screen:
             if self.alternate_active:
                 # The saved main screen keeps its rows until it comes back.
                 self._reflow_main_on_leave = True
@@ -455,11 +463,23 @@ class EmulatorScreen(pyte.Screen):
             [cursor_row]
             + [row for row in range(cursor_row, len(rows)) if any(c != default for c in rows[row].values())]
         )
+        # Reflowed in two parts split at the start of the screen's top
+        # logical line, so the rows above it are known.
+        first = len(self.scrollback)
+        while first and _continued(rows[first]):
+            first -= 1
+        head, _ = reflow_rows(rows[:first], columns, default, self._new_row)
         rows, (cursor_row, cursor_x) = reflow_rows(
-            rows[: last + 1], columns, default, self._new_row, (cursor_row, self.cursor.x)
+            rows[first : last + 1], columns, default, self._new_row, (cursor_row - first, self.cursor.x)
         )
+        rows = head + rows
+        cursor_row += len(head)
         # Bottom-anchored like xterm and VTE, but never above the cursor.
         top = min(max(0, len(rows) - lines), cursor_row)
+        if not self.pull_history_on_grow:
+            # conhost reflows its own buffer without pulling history down,
+            # and a console-API client (cmd.exe) addresses that buffer.
+            top = max(top, len(head))
         self._set_scrollback(rows[:top])
         self.buffer = self._new_buffer()
         for y, row in enumerate(rows[top : top + lines]):
@@ -656,6 +676,14 @@ class TerminalModel(LineIndexMixin):
     @pull_history_on_grow.setter
     def pull_history_on_grow(self, value: bool) -> None:
         self.screen.pull_history_on_grow = bool(value)
+
+    @property
+    def passthrough(self) -> bool:
+        return self.screen.passthrough
+
+    @passthrough.setter
+    def passthrough(self, value: bool) -> None:
+        self.screen.passthrough = bool(value)
 
     # -- input -----------------------------------------------------------------
 

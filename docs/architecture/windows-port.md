@@ -748,9 +748,14 @@ Done (details in windows-implementation-plan.md and the sections above):
   also rewraps on-screen rows only; scrollback would need a Python-side
   rewrap keyed on `sb_pushline4`'s continuation flag (available in the
   patched build). On Linux/macOS the built-in backend is opt-in and VTE
-  reflows. Revisit together with ConPTY passthrough mode. The pyte model
-  now rewraps the scrollback (and the screen on raw streams only), which
-  ConPTY never addresses (terminal-reflow.md).
+  reflows. The pyte model now rewraps the scrollback, and the visible
+  screen on raw streams and under the bundled conpty.dll 1.25, which was
+  measured to relay a VT client's bytes and send nothing on a resize
+  (terminal-reflow.md). Re-measured, the finding above was the model's
+  view: conpty.dll sends nothing on a resize, so the line stayed wrapped
+  only because the model did not rewrap it. Only the inbox console
+  repaints, and it positions later output against its own (reflowed)
+  viewport.
 - **Retiring MSYS2 and pywinpty (plan phase 8).** Waits for the first shipped
   Windows release: then remove the MSYS2 section, the
   `SSHPILOT_CONPTY_BACKEND=pywinpty` switch and the pywinpty dependency.
