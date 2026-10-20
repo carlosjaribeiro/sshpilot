@@ -103,24 +103,27 @@ def daemon_output_is_rendered() -> bool:
     return sys.platform == "win32"
 
 
-def conpty_passes_through() -> bool:
+def conpty_passes_through(daemon: bool = True) -> bool:
     """True when ConPTY here is Microsoft's bundled conpty.dll.
 
     It relays a VT client's bytes (ssh.exe) and sends nothing after a resize
     but a cursor query, so the model keeps owning its screen. The inbox
     console (kernel32, and pywinpty) repaints its viewport instead
-    (terminal-reflow.md). The local daemon resolves the same DLL.
+    (terminal-reflow.md), and so does conpty.dll without the OpenConsole.exe
+    beside it, which then starts the inbox conhost. The local daemon resolves
+    the same DLL; local shells always use the ctypes binding.
     """
 
     if sys.platform != "win32":
         return False
     # daemon/conpty_runner.py: CONPTY_BACKEND_ENV
-    if (os.environ.get("SSHPILOT_CONPTY_BACKEND") or "").strip().lower() in ("pywinpty", "winpty"):
+    if daemon and (os.environ.get("SSHPILOT_CONPTY_BACKEND") or "").strip().lower() in ("pywinpty", "winpty"):
         return False
     try:
         from .platform.windows.conpty import default_api
 
-        return default_api().source != "kernel32"
+        source = default_api().source
+        return source != "kernel32" and os.path.isfile(os.path.join(os.path.dirname(source), "OpenConsole.exe"))
     except Exception:  # noqa: BLE001 - the old, conservative behaviour
         logger.debug("Could not resolve the ConPTY DLL", exc_info=True)
         return False
@@ -1101,7 +1104,7 @@ class PyteTerminalBackend:
         )
         if daemon_output_is_rendered():
             # ConPTY keeps a top-anchored viewport, as for daemon sessions.
-            self._follow_conpty()
+            self._follow_conpty(daemon=False)
         try:
             pid = process.start(
                 list(argv or ()),
@@ -1206,7 +1209,7 @@ class PyteTerminalBackend:
         else:
             self.view.model.pull_history_on_grow = True
 
-    def _follow_conpty(self) -> None:
+    def _follow_conpty(self, daemon: bool = True) -> None:
         """Model settings for a stream that went through ConPTY.
 
         No history is pulled back on a grow: conhost would paint over it, or
@@ -1222,7 +1225,7 @@ class PyteTerminalBackend:
             wanted = bool(config.get_setting("terminal.reflow_visible_screen", True)) if config else True
         except Exception:  # noqa: BLE001
             wanted = True
-        model.passthrough = wanted and conpty_passes_through()
+        model.passthrough = wanted and conpty_passes_through(daemon)
 
     def get_pty(self) -> Optional[Any]:
         return None
