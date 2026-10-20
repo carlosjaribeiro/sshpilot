@@ -6,6 +6,8 @@ parsing; this module adds what an interactive terminal needs on top of it:
 * scrollback that survives full-screen scrolling and shrinking resizes,
 * the alternate screen (DECSET 47/1047/1049) used by vim, less, htop, ...,
 * replies to the remote (DA/DSR) routed to a callback instead of dropped,
+* reflow of soft-wrapped lines when the width changes
+  (``docs/architecture/terminal-reflow.md``),
 * selection/search over scrollback plus screen (``terminal_model_common``).
 """
 
@@ -19,6 +21,7 @@ from typing import Callable, Deque, Dict, List, Optional
 import pyte
 from pyte import modes as mo
 from pyte.screens import Char, StaticDefaultDict
+from wcwidth import wcwidth
 
 from .terminal_model_common import (  # noqa: F401  (re-exported for callers)
     MODE_ALTERNATE_SCROLL,
@@ -47,6 +50,101 @@ DEFAULT_SCROLLBACK_LINES = 10000
 _ALT_SCREEN_MODES = frozenset({47, 1047, 1049})
 
 
+class _Row(dict):
+    """A scrollback row; ``continued`` marks a soft wrap from the row above."""
+
+    __slots__ = ("continued",)
+
+    def __init__(self, cells=(), continued: bool = False) -> None:
+        super().__init__(cells)
+        self.continued = continued
+
+
+def _continued(line) -> bool:
+    return getattr(line, "continued", False)
+
+
+def _set_continued(line, value: bool) -> None:
+    if line is not None and (value or _continued(line)):
+        line.continued = value
+
+
+def reflow_rows(rows, columns, default, make_row, cursor=None):
+    """Rewrap ``rows`` to ``columns``; return ``(rows, cursor)``.
+
+    A row whose ``continued`` attribute is true joins the row above it into
+    one logical line. Hard line breaks are never joined. ``cursor`` is
+    ``(row, column)`` into ``rows`` and comes back as the same character's
+    new position (``None`` when not given). Cells keep their attributes; a
+    wide character never straddles two rows. ``make_row(continued)``
+    returns an empty row.
+    """
+
+    out = []
+    new_cursor = None
+    start = 0
+    while start < len(rows):
+        end = start + 1
+        while end < len(rows) and _continued(rows[end]):
+            end += 1
+        has_cursor = cursor is not None and start <= cursor[0] < end
+        first = rows[start]
+        if end - start == 1 and not has_cursor and (not first or max(first) < columns):
+            out.append(first)  # a short unwrapped row: nothing to do
+            start = end
+            continue
+
+        glyphs = []  # (cell, width), stubs after wide characters dropped
+        target = None  # the cursor as a column offset into the logical line
+        offset = 0
+        for index in range(start, end):
+            row = rows[index]
+            if has_cursor and index == cursor[0]:
+                target = offset + cursor[1]
+            if index < end - 1:
+                span = max(row) + 1 if row else 0  # a soft-wrapped row is full
+            else:
+                span = max((x + 1 for x, cell in row.items() if cell != default), default=0)
+            wide = False
+            for x in range(span):
+                cell = row.get(x, default)
+                if cell.data == "" and wide:
+                    wide = False
+                    continue
+                if cell.data == "":
+                    cell = cell._replace(data=" ")  # orphaned stub: a blank
+                width = 2 if wcwidth(cell.data[:1]) == 2 else 1
+                wide = width == 2
+                glyphs.append((cell, width))
+                offset += width
+
+        line = make_row(False)
+        placed = [line]
+        x = offset = 0
+        for cell, width in glyphs:
+            if x + width > columns and x:
+                line = make_row(True)
+                placed.append(line)
+                x = 0
+            if target is not None and new_cursor is None and offset + width > target:
+                new_cursor = (len(out) + len(placed) - 1, x)
+            line[x] = cell
+            if width == 2 and x + 1 < columns:
+                line[x + 1] = cell._replace(data="")
+            x += width
+            offset += width
+        if target is not None and new_cursor is None:
+            # After the last character, where a trimmed trailing blank was.
+            x += target - offset
+            while x >= columns:
+                placed.append(make_row(True))
+                x -= columns
+            new_cursor = (len(out) + len(placed) - 1, x)
+        out.extend(placed)
+        start = end
+    return out, new_cursor
+
+
 class EmulatorScreen(pyte.Screen):
     """``pyte.Screen`` with scrollback, an alternate screen, and replies."""
 
@@ -72,6 +170,11 @@ class EmulatorScreen(pyte.Screen):
         #: top-anchored viewport after a resize (ConPTY), where the pulled
         #: rows would be painted over and lost.
         self.pull_history_on_grow = True
+        #: Rewrap soft-wrapped lines when the width changes: always in the
+        #: scrollback, on the screen only where ``pull_history_on_grow`` says
+        #: the model owns it (not ConPTY) and never on the alternate screen.
+        self.reflow = True
+        self._drawing = False
         super().__init__(columns, lines)
 
     # -- small helpers -------------------------------------------------------
@@ -86,10 +189,36 @@ class EmulatorScreen(pyte.Screen):
     def _push_scrollback(self, line: Line) -> None:
         if self.scrollback.maxlen == 0 or self.alternate_active:
             return
-        self.scrollback.append(dict(line))
+        self.scrollback.append(_Row(line, _continued(line)))
         self.scrollback_pushes += 1
 
+    def _new_row(self, continued: bool = False):
+        row = StaticDefaultDict[int, Char](self.default_char)
+        _set_continued(row, continued)
+        return row
+
     # -- pyte event overrides ------------------------------------------------
+
+    def draw(self, data: str) -> None:
+        # pyte's draw calls linefeed() only to autowrap.
+        self._drawing = True
+        try:
+            super().draw(data)
+        finally:
+            self._drawing = False
+
+    def linefeed(self) -> None:
+        super().linefeed()
+        if self._drawing:
+            self.buffer[self.cursor.y].continued = True
+
+    def erase_in_line(self, how: int = 0, private: bool = False) -> None:
+        super().erase_in_line(how, private)
+        # The erased part no longer joins the neighbouring row.
+        if how in (0, 2):
+            _set_continued(self.buffer.get(self.cursor.y + 1), False)
+        if how in (1, 2):
+            _set_continued(self.buffer.get(self.cursor.y), False)
 
     def write_process_input(self, data: str) -> None:
         if self.on_reply is not None:
@@ -120,6 +249,9 @@ class EmulatorScreen(pyte.Screen):
             self.dirty.update(range(self.lines))
             return
         super().erase_in_display(how, *args, **kwargs)
+        rows = {0: range(self.cursor.y + 1, self.lines), 1: range(self.cursor.y + 1)}
+        for y in rows.get(how, range(self.lines)):
+            _set_continued(self.buffer.get(y), False)
 
     def set_mode(self, *modes: int, **kwargs) -> None:
         if kwargs.get("private"):
@@ -165,6 +297,18 @@ class EmulatorScreen(pyte.Screen):
         if lines == self.lines and columns == self.columns:
             return
 
+        if self.reflow and columns != self.columns:
+            if self.pull_history_on_grow and not self.alternate_active:
+                self._reflow_screen(lines, columns)
+                self._finish_resize(lines, columns)
+                return
+            # ConPTY repaints its own unreflowed screen and the shell
+            # addresses it absolutely; only the scrollback is ours to rewrap.
+            history, _ = reflow_rows(
+                list(self.scrollback), columns, self.default_char, lambda continued: _Row(continued=continued)
+            )
+            self._set_scrollback(history)
+
         if lines < self.lines:
             # Keep the cursor row on screen: scroll the top rows away (into
             # the scrollback on the main screen) rather than clipping the
@@ -188,7 +332,9 @@ class EmulatorScreen(pyte.Screen):
             self._shift_down(pulled)
             for y in range(pulled - 1, -1, -1):
                 restored = StaticDefaultDict[int, Char](self.default_char)
-                restored.update(self.scrollback.pop())
+                popped = self.scrollback.pop()
+                restored.update(popped)
+                _set_continued(restored, _continued(popped))
                 self.buffer[y] = restored
             self.cursor.y += pulled
 
@@ -198,12 +344,45 @@ class EmulatorScreen(pyte.Screen):
                     for x in [x for x in line if x >= columns]:
                         line.pop(x, None)
 
+        self._finish_resize(lines, columns)
+
+    def _finish_resize(self, lines: int, columns: int) -> None:
         self.lines, self.columns = lines, columns
         self.tabstops = set(range(8, self.columns, 8))
         self.set_margins()
         self.ensure_hbounds()
         self.ensure_vbounds()
         self.dirty.update(range(self.lines))
+
+    def _set_scrollback(self, rows) -> None:
+        self.scrollback.clear()
+        self.scrollback.extend(row if isinstance(row, _Row) else _Row(row, _continued(row)) for row in rows)
+
+    def _reflow_screen(self, lines: int, columns: int) -> None:
+        """Rewrap scrollback and screen together, keeping the cursor's text."""
+
+        default = self.default_char
+        rows = list(self.scrollback) + [self.buffer[y] for y in range(self.lines)]
+        cursor_row = len(self.scrollback) + self.cursor.y
+        # Blank rows below the cursor are dropped, not wrapped into history.
+        last = max(
+            [cursor_row]
+            + [row for row in range(cursor_row, len(rows)) if any(c != default for c in rows[row].values())]
+        )
+        rows, (cursor_row, cursor_x) = reflow_rows(
+            rows[: last + 1], columns, default, self._new_row, (cursor_row, self.cursor.x)
+        )
+        # Bottom-anchored like xterm and VTE, but never above the cursor.
+        top = min(max(0, len(rows) - lines), cursor_row)
+        self._set_scrollback(rows[:top])
+        self.buffer = self._new_buffer()
+        for y, row in enumerate(rows[top : top + lines]):
+            if not isinstance(row, StaticDefaultDict):  # a row from the scrollback
+                row, cells = self._new_row(_continued(row)), row
+                row.update(cells)
+            self.buffer[y] = row
+        self.cursor.y = cursor_row - top
+        self.cursor.x = cursor_x
 
     def _shift_up(self, count: int) -> None:
         moved = self._new_buffer()
