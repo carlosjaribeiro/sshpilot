@@ -490,3 +490,24 @@ def test_rows_the_main_screen_pushes_on_return_count_as_scrollback_pushes(passth
     model.feed(b"\x1b[?1049l")
     assert model.history_length > history
     assert model.screen.scrollback_pushes - pushes == model.history_length - history
+
+
+@pytest.mark.parametrize("passthrough", [False, True])
+@pytest.mark.parametrize("filled", [50, 100, 300])  # below, at and past the limit of 100
+@pytest.mark.parametrize("size", [(20, 5), (40, 3), (20, 3)])
+def test_alt_exit_pushes_are_counted_even_when_the_scrollback_is_full(passthrough, filled, size):
+    model = TerminalModel(40, 5, scrollback_limit=100)
+    model.pull_history_on_grow = not passthrough
+    model.passthrough = passthrough
+    for number in range(filled):
+        model.feed(b"h%05d\r\n" % number)
+    model.feed(LONG.encode() + b"\r\n" + LONG.encode() + b"\r\n$ vim")
+    model.feed(b"\x1b[?1049h\x1b[Heditor")
+    model.resize(*size)
+    offset, pushes = 3, model.screen.scrollback_pushes
+    text = model.row_text(model.viewport_top(offset))
+    model.feed(b"\x1b[?1049l")
+    # What PyteTerminalView.feed does with a scrolled-back view.
+    offset = min(model.history_length, offset + model.screen.scrollback_pushes - pushes)
+    assert model.screen.scrollback_pushes > pushes
+    assert model.row_text(model.viewport_top(offset)) == text
