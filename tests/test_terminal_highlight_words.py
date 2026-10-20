@@ -5,7 +5,8 @@ import re
 
 import pytest
 
-from sshpilot.terminal_highlight import Highlighter, apply_config
+from sshpilot.terminal_highlight import Highlighter, apply_config, profile_rules
+from sshpilot.terminal_highlight_custom import CustomProfile, EditableRule
 from sshpilot.terminal_highlight_securecrt import THEME_COLOURS, compile_rules, line_owners
 
 LINES = [
@@ -119,6 +120,11 @@ def _applied(background, **settings):
     return h
 
 
+def test_short_hex_background_is_understood():
+    assert _applied("#000").theme == "securecrt-dark"
+    assert _applied("#fff").theme == "securecrt"
+
+
 def test_dark_background_picks_dark_securecrt_theme_only_for_the_default_theme():
     assert _applied("#000000").theme == "securecrt-dark"
     assert _applied("#FFFFFF").theme == "securecrt"
@@ -148,3 +154,24 @@ def test_forced_bold_keeps_remote_bold_and_ends_with_normal_intensity():
 def test_bold_option_does_not_touch_legacy_profiles():
     h = Highlighter("generic", bold=True)
     assert b"\x1b[1;" not in feed(h, b"10.0.0.1\r\n")
+
+
+# --- whole words are for the built-in rules only ----------------------------
+
+def _owned(profile, line):
+    h = Highlighter(profile)
+    out = h.feed((line + "\r\n").encode()) + h.flush()
+    return [(c, t) for c, t in runs(out) if c]
+
+
+def test_duplicate_of_securecrt_profile_equals_the_original():
+    duplicate = CustomProfile("Copy", tuple(profile_rules("cisco-securecrt")))
+    for line in LINES + ["SW#show run", "interface GigabitEthernet0/1 is up, line protocol is up"]:
+        assert _owned(duplicate, line) == _owned("cisco-securecrt", line), line
+
+
+def test_user_rule_matches_exactly_as_written():
+    profile = CustomProfile("Mine", (EditableRule("err", "bad"),))
+    coloured = [t for _c, t in _owned(profile, "an error occurred")]
+    assert coloured == ["err"]  # inside "error": not a whole word, still matched
+    assert _owned("cisco-securecrt", "an error occurred") == []

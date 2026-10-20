@@ -34,11 +34,14 @@ to this profile and to custom profiles; the setting is greyed out for the
 others. Custom themes (copies with your own colours) are listed after these.
 
 `securecrt` is designed for a light background (SecureCRT's own `Cisco Words`;
-VanDyke ships a separate `DkBg` list for dark ones). `securecrt-dark` raises the
-lightness of every `securecrt` colour to at least 0.62 and keeps hue and
-saturation. While the theme is `securecrt` and the terminal theme's background
-is dark, `securecrt-dark` is used automatically; the saved setting stays
-`securecrt`, and choosing any other theme turns this off.
+VanDyke ships a separate `DkBg` list for dark ones). `securecrt-dark` is a
+regular, explicitly selectable theme: every `securecrt` colour with its
+lightness raised to at least 0.62, hue and saturation kept. It is chosen
+automatically only when the saved theme is `securecrt` and the terminal theme's
+background is dark (`#RGB` or `#RRGGBB`, luminance below 50%); the saved setting
+stays `securecrt`. Choosing `securecrt-dark` yourself, or any other theme
+(`dark`, `light`, a custom theme, …), uses exactly that theme: an explicit choice
+is never auto-switched.
 
 *Bold Highlighted Text* (`terminal.highlight_bold`, default on) paints every
 highlighted run of the *Cisco (SecureCRT-style)* profile bold, as SecureCRT does
@@ -196,16 +199,21 @@ to 4096 bytes is matched whole (the two exceptions are under **Line cap**), so
 `.*thernet…`, `.*down.?`, `.*-more-.*`, `snmp.*`, the `^` prompt rules and `$`
 behave as in SecureCRT. Visible bytes never change.
 
-**Whole words.** A match may not start or end inside a word: when its first
-(last) character is a letter, digit or `_`, the character before (after) the
-match must not be one. Symbol edges (`#`, `.`, `,`) are exempt, so the prompt
-`SW#show` and `bits/sec,` still match. This is a lookaround added around every
-rule when compiled (`whole_word`), not a post-filter, so a rule can backtrack to
-an alternative that fits. It stops `v` in `server`, `h` in `dhcp`, `no` in
-`none`. Evidence: the list's "gray keywords work around symbol delimited words"
-comments and SecureCRT's behaviour on a real `show running-config`; VanDyke does
-not document how `Regex Line Mode=0` delimits words (confidence: medium). The
-`_` counts as a word character, so `ISE_RADIUS` stays one word.
+**Whole words (a deliberate adaptation, confidence medium).** SecureCRT's
+rules are not matched as raw substrings: with the verbatim regexes, `H`, `V`,
+`des` or `on` would colour letters inside `dhcp`, `server` or `authorization`,
+which SecureCRT does not do. So the 51 built-in rules (and exact, unedited
+copies of them in a custom profile, so *Duplicate* equals the original) are
+matched on whole words: when a match's first (last) character is a letter,
+digit or `_`, the character before (after) it must not be one. Symbol edges
+(`#`, `.`, `,`) are exempt, so the prompt `SW#show` and `bits/sec,` still match.
+It is a lookaround added when compiling (`whole_word`), not a post-filter, so a
+rule can still backtrack to an alternative that fits. `_` counts as a word
+character, so `ISE_RADIUS` stays one word. Evidence: the list's "gray keywords
+work around symbol delimited words" comments and side-by-side screenshots of
+SecureCRT; VanDyke does not document how `Regex Line Mode=0` delimits words.
+Rules you write or edit yourself (custom profiles, `highlight_rules.*` files)
+match exactly as written: `err` still matches inside `error`; add `\b` yourself.
 
 Rule file format. The reference is the user's original SecureCRT export
 (`tests/data/securecrt-cisco-words.original.ini`), which holds two lists of 71

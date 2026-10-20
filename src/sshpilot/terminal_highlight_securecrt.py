@@ -410,7 +410,8 @@ def compile_rules(theme: Theme, bold: bool = False) -> Tuple[CompiledRule, ...]:
         rule_bold = bold or rule.bold
         opening, closing = style_bytes(rule.role, theme, rule_bold)
         compiled.append(CompiledRule(
-            re.compile(whole_word(rule.pattern), 0 if rule.match_case else re.IGNORECASE),
+            re.compile(whole_word(rule.pattern) if rule.source in _BUILTIN else rule.pattern,
+                       0 if rule.match_case else re.IGNORECASE),
             opening, closing, rule_bold,
         ))
     return tuple(compiled)
@@ -423,7 +424,9 @@ _WHOLE_WORD = (rf"(?:(?<![{_W}])|(?=[^{_W}]))(?:{{}})(?:(?![{_W}])|(?<=[^{_W}]))
 
 
 def whole_word(pattern: str) -> str:
-    """Make ``pattern`` match whole words, like SecureCRT (see ``docs/highlighting.md``).
+    """Make a built-in SecureCRT ``pattern`` match whole words (``docs/highlighting.md``).
+
+    Applied to the built-in rules only; user-authored rules match as written.
 
     A lookaround rather than a post-filter, so the regex still backtracks to
     an alternative that fits (``shut.*`` after a word start, not ``no`` in ``none``).

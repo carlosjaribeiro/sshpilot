@@ -796,6 +796,9 @@ class PreferencesWindow(Adw.Window):
             'notify::active',
             lambda row, _param: self.config.set_setting('terminal.highlight_bold', row.get_active()),
         )
+        self.highlight_bold_row.set_sensitive(
+            self.config.get_setting('terminal.highlight_profile', 'generic') == 'cisco-securecrt'
+        )
         group.add(self.highlight_bold_row)
 
         self._reload_highlight_rows()

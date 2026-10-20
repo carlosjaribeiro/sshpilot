@@ -253,6 +253,8 @@ _TRUSTED: Dict[str, Optional[Validator]] = {
        for rule in _rules(profile)},
 }
 
+_SECURECRT_SOURCES = frozenset(rule.source for rule in SECURECRT_RULES)
+
 ProfileRef = Union[str, CustomProfile]
 ThemeRef = Union[str, CustomTheme]
 
@@ -312,7 +314,9 @@ def _compile_custom(profile: CustomProfile, theme: ThemeRef) -> Tuple[CompiledRu
             pattern, validate = _numbered(number, rule)
             opening, closing = style_bytes(rule.colour, colours, rule.bold)
             flags = 0 if rule.match_case else re.IGNORECASE
-            compiled.append(CompiledRule(re.compile(whole_word(pattern), flags), opening, closing,
+            if rule.pattern in _SECURECRT_SOURCES:  # a copy of a built-in; user rules run as written
+                pattern = whole_word(pattern)
+            compiled.append(CompiledRule(re.compile(pattern, flags), opening, closing,
                                          rule.bold, validate))
     return tuple(compiled)
 
@@ -794,6 +798,8 @@ def _dark_background(config: object) -> bool:
     """Whether the terminal background (``#RRGGBB``) is dark; False if unknown."""
     try:
         value = config.get_terminal_profile()["background"]  # type: ignore[attr-defined]
+        if len(value) == 4:  # #RGB
+            value = "#" + "".join(c * 2 for c in value[1:])
         red, green, blue = (int(value[i:i + 2], 16) for i in (1, 3, 5))
     except Exception:
         return False
