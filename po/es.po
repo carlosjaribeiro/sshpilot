@@ -16991,6 +16991,11 @@ msgstr "paso a través"
 msgid "Copy key to Server"
 msgstr "Copiar clave al servidor"
 
+
+#: src/sshpilot/preferences.py:6689
+msgid "Text reflow on resize needs the pyte model."
+msgstr ""
+
 #~ msgid "Connection list actions"
 #~ msgstr "Acciones de la lista de conexiones"
 

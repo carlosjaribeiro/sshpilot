@@ -58,6 +58,104 @@ def test_daemon_sessions_pull_history_on_grow_only_without_conpty(model, platfor
     assert backend.view.model.pull_history_on_grow is pulls
 
 
+@pytest.mark.parametrize(
+    "dll, opener, backend_env, setting, passthrough",
+    [
+        (True, True, "", True, True),
+        (False, False, "", True, False),  # kernel32
+        (True, False, "", True, False),  # conpty.dll starts the inbox conhost
+        (True, True, "pywinpty", True, False),
+        (True, True, "", False, False),
+    ],
+)
+def test_only_a_passthrough_conpty_lets_the_model_reflow_its_screen(
+    dll, opener, backend_env, setting, passthrough, monkeypatch, tmp_path
+):
+    import types
+
+    from sshpilot import terminal_backend_pyte
+    from sshpilot.platform.windows import conpty
+
+    (tmp_path / "conpty.dll").write_bytes(b"")
+    if opener:
+        (tmp_path / "OpenConsole.exe").write_bytes(b"")
+    source = str(tmp_path / "conpty.dll") if dll else "kernel32"
+    monkeypatch.setenv("SSHPILOT_TERMINAL_MODEL", "pyte")
+    monkeypatch.setenv("SSHPILOT_CONPTY_BACKEND", backend_env)
+    settings = {"terminal.reflow_visible_screen": setting}
+    config = types.SimpleNamespace(get_setting=lambda key, default=None: settings.get(key, default))
+    backend = terminal_backend_pyte.PyteTerminalBackend(types.SimpleNamespace(config=config))
+    monkeypatch.setattr(terminal_backend_pyte.sys, "platform", "win32")
+    monkeypatch.setattr(conpty, "default_api", lambda: types.SimpleNamespace(source=source))
+    backend.prepare_pty_less_emulation()
+    assert backend.view.model.pull_history_on_grow is False
+    assert backend.view.model.passthrough is passthrough
+
+
+def test_local_shells_ignore_the_daemon_conpty_backend_switch(monkeypatch, tmp_path):
+    """SSHPILOT_CONPTY_BACKEND only picks the daemon's binding; local shells
+    always run under the ctypes one and so the bundled conpty.dll."""
+    import types
+
+    from sshpilot import terminal_backend_pyte
+    from sshpilot.platform.windows import conpty
+
+    (tmp_path / "conpty.dll").write_bytes(b"")
+    (tmp_path / "OpenConsole.exe").write_bytes(b"")
+    monkeypatch.setenv("SSHPILOT_CONPTY_BACKEND", "pywinpty")
+    monkeypatch.setattr(terminal_backend_pyte.sys, "platform", "win32")
+    monkeypatch.setattr(conpty, "default_api", lambda: types.SimpleNamespace(source=str(tmp_path / "conpty.dll")))
+    assert terminal_backend_pyte.conpty_passes_through(daemon=False)
+    assert not terminal_backend_pyte.conpty_passes_through()
+
+
+def test_scrolled_back_view_keeps_its_text_when_the_main_screen_returns(monkeypatch):
+    monkeypatch.setenv("SSHPILOT_TERMINAL_MODEL", "pyte")
+    view = PyteTerminalView()
+    view.model.resize(40, 5)
+    long = b"".join(bytes([97 + n % 26]) for n in range(60))
+    view.feed(b"".join(b"h%d\r\n" % n for n in range(8)) + long + b"\r\n" + long + b"\r\n$ vim")
+    view.feed(b"\x1b[?1049h\x1b[Heditor")
+    view.model.resize(20, 5)
+    view.scroll_lines(3)
+    top = view.model.row_text(view.model.viewport_top(view.scroll_offset))
+    view.feed(b"\x1b[?1049l")
+    assert view.model.row_text(view.model.viewport_top(view.scroll_offset)) == top
+
+
+@pytest.mark.parametrize("model, setting, hint", [("pyte", True, False), ("vterm", True, True), ("vterm", False, False)])
+def test_conpty_terminals_log_their_reflow_state_once(model, setting, hint, monkeypatch, tmp_path, caplog):
+    import logging
+    import types
+
+    from sshpilot import terminal_backend_pyte
+    from sshpilot.platform.windows import conpty
+
+    dll = tmp_path / "conpty.dll"
+    dll.write_bytes(b"")
+    (tmp_path / "OpenConsole.exe").write_bytes(b"")
+    monkeypatch.setenv("SSHPILOT_TERMINAL_MODEL", model)
+    monkeypatch.delenv("SSHPILOT_CONPTY_BACKEND", raising=False)
+    settings = {"terminal.reflow_visible_screen": setting}
+    config = types.SimpleNamespace(get_setting=lambda key, default=None: settings.get(key, default))
+    backend = terminal_backend_pyte.PyteTerminalBackend(types.SimpleNamespace(config=config))
+    # Without libvterm installed the view falls back to pyte; the hint keys on the name.
+    monkeypatch.setattr(backend.view, "model_name", model)
+    monkeypatch.setattr(terminal_backend_pyte.sys, "platform", "win32")
+    monkeypatch.setattr(conpty, "default_api", lambda: types.SimpleNamespace(source=str(dll)))
+    with caplog.at_level(logging.INFO, logger=terminal_backend_pyte.logger.name):
+        backend.prepare_pty_less_emulation()
+        backend.prepare_pty_less_emulation()
+    states = [r.getMessage() for r in caplog.records if r.getMessage().startswith("ConPTY terminal:")]
+    expected_model = type(backend.view.model).__name__
+    assert states == [
+        f"ConPTY terminal: model={expected_model} pull_history_on_grow=False "
+        f"passthrough={setting} reflow_visible_screen={setting} conpty_passes_through=True source={dll}"
+    ]
+    hints = [r.getMessage() for r in caplog.records if "only available with the pyte model" in r.getMessage()]
+    assert len(hints) == (1 if hint else 0)
+
+
 @pytest.mark.parametrize("model", ["pyte", "vterm"])
 def test_synchronized_update_holds_the_repaint(model, monkeypatch):
     monkeypatch.setenv("SSHPILOT_TERMINAL_MODEL", model)

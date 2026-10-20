@@ -17027,6 +17027,11 @@ msgstr "Сквозная передача"
 msgid "Copy key to Server"
 msgstr "Скопировать ключ на сервер"
 
+
+#: src/sshpilot/preferences.py:6689
+msgid "Text reflow on resize needs the pyte model."
+msgstr ""
+
 #~ msgid "Connection list actions"
 #~ msgstr "Действия со списком подключений"
 
