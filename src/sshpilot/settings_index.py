@@ -123,7 +123,14 @@ SETTINGS = (
         "terminal", N_("Highlighting"), N_("Highlight Network Output"),
         N_("syntax;color;colour;cisco;junos;huawei;ip;mac;vlan"),
     ),
-    SettingEntry("terminal", N_("Highlighting"), N_("Highlight Profile"), N_("cisco;junos;huawei")),
+    SettingEntry(
+        "terminal", N_("Highlighting"), N_("Highlight Profile"),
+        N_("cisco;securecrt;junos;huawei;custom;rules;regex"),
+    ),
+    SettingEntry(
+        "terminal", N_("Highlighting"), N_("Highlight Colour Theme"),
+        N_("securecrt;dark;light;high contrast;terminal palette;custom"),
+    ),
     SettingEntry("terminal", N_("Backend"), N_("Terminal Backend"), N_("vte;xterm.js")),
     SettingEntry("terminal", N_("Keyboard"), N_("Terminal Shortcut Pass-through")),
     SettingEntry("terminal", N_("Keyboard"), N_("Command autocomplete"),

@@ -48,7 +48,7 @@ WHEEL_SCROLL_LINES = DEFAULT_WHEEL_SCROLL_LINES
 # ssh_process_manager.py (GTK-free). Re-exported here so existing
 # `from .terminal import SSHProcessManager` / `process_manager` callers keep working.
 from .ssh_process_manager import SSHProcessManager, process_manager  # noqa: F401
-from .terminal_highlight import Highlighter, apply_config
+from .terminal_highlight import FLUSH_DELAY, Highlighter, apply_config
 from .terminal_search import TerminalSearch
 from .shortcut_utils import (
     accel_matches_latin_fallback,
@@ -276,6 +276,7 @@ vte-terminal {
 class TerminalWidget(Gtk.Box):
     """A terminal widget for daemon sessions, local shells, and presentation."""
     __gtype_name__ = 'TerminalWidget'
+    _highlight_warning_shown = None
 
     # Signals
     __gsignals__ = {
@@ -1957,6 +1958,10 @@ class TerminalWidget(Gtk.Box):
                     list(after),
                 )
         backend.feed(self._highlighter.feed(data))
+        if self._highlighter.pending and getattr(self, "_highlight_timer_id", None) is None:
+            self._highlight_timer_id = GLib.timeout_add(
+                int(FLUSH_DELAY * 1000), self._on_highlight_flush
+            )
         if tracker is not None and self._needs_legacy_mouse_translation():
             # Settles on top of whatever the remote just set, so the emulator
             # ends up in SGR whenever the remote asked for a legacy mode.
@@ -5310,20 +5315,57 @@ class TerminalWidget(Gtk.Box):
             obj = self.__dict__["_highlighter_obj"] = Highlighter(enabled=False)
         return obj
 
+    def _on_highlight_flush(self) -> bool:
+        """Show a held unfinished line once terminal output goes idle."""
+        backend = getattr(self, "backend", None)
+        if not getattr(self, "_destroyed", False) and backend is not None:
+            held = self._highlighter.flush_due()
+            if held:
+                backend.feed(held)
+            if self._highlighter.pending:
+                return True
+        self._highlight_timer_id = None
+        return False
+
     def _apply_highlight_settings(self) -> bool:
-        held = apply_config(self._highlighter, self.config)
+        highlighter = self._highlighter
+        held = apply_config(highlighter, self.config)
         logger.debug(
-            "Output highlighting enabled=%s profile=%s",
-            self._highlighter.enabled,
-            self._highlighter.profile,
+            "Output highlighting enabled=%s profile=%s theme=%s",
+            highlighter.enabled,
+            getattr(highlighter.profile, "name", highlighter.profile),
+            getattr(highlighter.theme, "name", highlighter.theme),
         )
+        if highlighter.warning is None:
+            TerminalWidget._highlight_warning_shown = None
+        elif highlighter.warning != TerminalWidget._highlight_warning_shown:
+            warning = highlighter.warning
+            logger.warning("%s", warning)
+
+            def show():
+                if TerminalWidget._highlight_warning_shown != warning:
+                    try:
+                        toast = Adw.Toast.new(warning)
+                        toast.set_use_markup(False)
+                        toast.set_timeout(6)
+                    except Exception:
+                        return False
+                    if self._present_toast(toast):
+                        TerminalWidget._highlight_warning_shown = warning
+                return False
+
+            show()
+            GLib.idle_add(show)
         if held:
             # Switched off mid-escape: show the bytes that were held back.
             self.backend.feed(held)
         return False
 
     def _on_config_setting_changed(self, _config, key, value):
-        if key in ('terminal.highlight_enabled', 'terminal.highlight_profile'):
+        if key in (
+            'terminal.highlight_enabled', 'terminal.highlight_profile',
+            'terminal.highlight_theme', 'terminal.highlight_bold', 'terminal.theme',
+        ):
             GLib.idle_add(self._apply_highlight_settings)
         elif key == 'terminal.pass_through_mode':
             GLib.idle_add(self._apply_pass_through_mode, bool(value))
