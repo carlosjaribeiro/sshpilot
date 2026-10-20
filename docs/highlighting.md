@@ -41,7 +41,8 @@ the buttons on its row:
 
 - **Edit** (pencil): for a built-in, opens a copy named "… (copy)"; for a custom
   one, edits it. **Save** stores it; when editing a custom entry, **Save as New**
-  keeps the original and stores a copy under the name in the *Name* field.
+  keeps the original and stores a copy once the *Name* field holds a new name.
+  Closing with unsaved changes asks first.
 - **Duplicate** (two pages): always opens a copy, also of a custom entry.
 - **Delete** (bin): custom entries only, after a confirmation. Terminals using it
   switch to *Generic* (profile) or *SecureCRT* (theme).
@@ -59,13 +60,18 @@ deleting it. **+** adds a rule; **Import…** appends the rules of a SecureCRT
 keyword-list export or a simple rules file (see [Custom rules](#custom-rules)).
 
 The **Live Preview** paints sample `show ip interface brief`, `show running-config`
-and syslog lines with the rules being edited, on the current terminal colours.
-Paste a line of your own into **Test text** to see it on top.
+and syslog lines with the rules being edited (the theme editor: with the
+selected profile), on the current terminal colours. Paste a line of your own
+into **Test text** to see it on top. A copy of *Cisco (SecureCRT-style)* paints
+exactly like the built-in, including the verbatim source rules that colour
+parts of words (`h` in `GigabitEthernet`, `as` in `unassigned`; see the
+deviations table below).
 
 Validation happens while you type and before anything is written: a rule must
 pass the same safety check as the rules file (see [Custom rules](#custom-rules)),
 and a name must be non-empty, at most 64 characters, and not used by another
-custom profile (or theme), ignoring case. Problems are shown in a banner and on
+custom profile (or theme) or a built-in one (`generic`, *Generic*, …), ignoring
+case. Descriptions are at most 200 characters. Problems are shown in a banner and on
 the rule's row, and **Save** stays disabled until they are fixed. A profile has
 at most 500 rules; at most 100 custom profiles and 100 custom themes are kept.
 
@@ -120,8 +126,13 @@ roles, larger than 256 KiB) never stops highlighting: terminals keep the
 profile and theme they had (the defaults at start-up) and show a notification,
 as they do when a selected custom profile is missing or one of its rules fails
 the safety check. Saving from the editor then moves the unreadable file to
-`highlight_profiles.json.bad` and writes a new one. Edits made to the file by
-hand are picked up on the next highlighting setting change.
+`highlight_profiles.json.bad` and writes a new one; a save that would make the
+file larger than 256 KiB is refused. Edits made to the file by hand are picked
+up on the next highlighting setting change.
+
+Every save re-reads the file and replaces it atomically, so two sshPilot
+windows or processes do not undo each other's saved profiles; only two saves
+in the very same instant can lose one of them (there is no lock file).
 
 ## Custom rules
 

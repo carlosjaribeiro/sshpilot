@@ -29,8 +29,9 @@ import tempfile
 from dataclasses import dataclass, field, replace
 from gettext import gettext as _
 from pathlib import Path
-from typing import Any, Dict, Iterable, Mapping, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 
+from .i18n import N_
 from .platform.paths import get_config_dir
 from .terminal_highlight_securecrt import (
     _MAX_FILE_BYTES,
@@ -51,6 +52,21 @@ MAX_DESCRIPTION_LENGTH = 200
 MAX_ENTRIES = 100  # profiles, and themes, per file
 # Every role a rule or theme can colour; "default" is the unstyled baseline.
 ROLES = tuple(role for role in THEME_COLOURS["securecrt"] if role != "default")
+# Built-in names, shown in the selectors; custom names may not repeat them.
+PROFILE_LABELS = {
+    "generic": N_("Generic"),
+    "cisco-ios": N_("Cisco IOS"),
+    "cisco-securecrt": N_("Cisco (SecureCRT-style)"),
+    "junos": N_("Junos"),
+    "huawei-vrp": N_("Huawei VRP"),
+}
+THEME_LABELS = {
+    "securecrt": N_("SecureCRT"),
+    "dark": N_("Dark"),
+    "light": N_("Light"),
+    "high-contrast": N_("High Contrast"),
+    "terminal-palette": N_("Terminal Palette"),
+}
 _HEX = re.compile(r"#[0-9A-Fa-f]{6}")
 
 
@@ -99,6 +115,11 @@ def hex_to_rgb(value: str) -> RGB:
     return tuple(bytes.fromhex(value[1:]))  # type: ignore[return-value]
 
 
+def reserved_names(labels: Mapping[str, str]) -> List[str]:
+    """Built-in ids and labels (also translated), which custom names avoid."""
+    return [*labels, *labels.values(), *map(_, labels.values())]
+
+
 def check_name(name: str, taken: Iterable[str]) -> str:
     """Return the stripped name, or raise ValueError with a message to show."""
     name = name.strip()
@@ -123,7 +144,7 @@ def check_theme(theme: CustomTheme) -> None:
     for role, colour in theme.colours:
         if role not in ROLES:
             raise ValueError(_("Unknown role “{role}”.").format(role=role))
-        if not _HEX.fullmatch(colour):
+        if not isinstance(colour, str) or not _HEX.fullmatch(colour):
             raise ValueError(_("Colour for “{role}” must be #RRGGBB.").format(role=role))
 
 
@@ -138,16 +159,26 @@ def theme_colours(theme: Union[str, CustomTheme]) -> Mapping[str, Colour]:
 # --- JSON ---------------------------------------------------------------
 
 
+def _kind_name(kind: type) -> str:
+    return {str: _("text"), bool: _("true or false"), list: _("a list"),
+            dict: _("an object")}[kind]
+
+
 def _field(data: Mapping[str, Any], key: str, kind: type, default: Any = None) -> Any:
     value = data.get(key, default)
     if not isinstance(value, kind):
-        raise ValueError(f"{key!r} must be {kind.__name__}")
+        raise ValueError(_("“{key}” must be {kind}.").format(key=key, kind=_kind_name(kind)))
+    return value
+
+
+def _object(value: Any, what: str) -> Mapping[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(_("Each {what} must be an object.").format(what=what))
     return value
 
 
 def _rule_from_json(data: Any) -> EditableRule:
-    if not isinstance(data, dict):
-        raise ValueError("a rule must be an object")
+    data = _object(data, _("rule"))
     rule = EditableRule(
         _field(data, "pattern", str),
         _field(data, "colour", str),
@@ -163,24 +194,26 @@ def _rule_from_json(data: Any) -> EditableRule:
 def parse_store(text: str) -> Store:
     """Parse the file contents; raise ValueError on any structural problem."""
     data = json.loads(text)
-    if not isinstance(data, dict) or data.get("version") != STORE_VERSION:
-        raise ValueError(f"expected an object with \"version\": {STORE_VERSION}")
+    # type() rather than ==, so that "version": true is not taken for 1.
+    if not isinstance(data, dict) or type(data.get("version")) is not int \
+            or data["version"] != STORE_VERSION:
+        raise ValueError(_("Expected an object with \"version\": {version}.").format(
+            version=STORE_VERSION))
     store = Store()
     profiles = _field(data, "profiles", list, [])
     themes = _field(data, "themes", list, [])
     if len(profiles) > MAX_ENTRIES or len(themes) > MAX_ENTRIES:
-        raise ValueError(f"more than {MAX_ENTRIES} profiles or themes")
+        raise ValueError(_("More than {count} profiles or themes.").format(count=MAX_ENTRIES))
     for entry in profiles:
-        if not isinstance(entry, dict):
-            raise ValueError("a profile must be an object")
+        entry = _object(entry, _("profile"))
         name = check_name(_field(entry, "name", str), store.profiles)
         rules = _field(entry, "rules", list)
         if len(rules) > _MAX_RULES:
-            raise ValueError(f"profile {name!r} has more than {_MAX_RULES} rules")
+            raise ValueError(_("Profile “{name}” has more than {count} rules.").format(
+                name=name, count=_MAX_RULES))
         store.profiles[name] = CustomProfile(name, tuple(map(_rule_from_json, rules)))
     for entry in themes:
-        if not isinstance(entry, dict):
-            raise ValueError("a theme must be an object")
+        entry = _object(entry, _("theme"))
         name = check_name(_field(entry, "name", str), store.themes)
         colours = _field(entry, "colours", dict, {})
         theme = CustomTheme(name, _field(entry, "base", str), tuple(colours.items()))
@@ -227,9 +260,10 @@ def load_store(path: Optional[Path] = None) -> Store:
         return cached[1]
     try:
         if stat.st_size > _MAX_FILE_BYTES:
-            raise ValueError(f"file is larger than {_MAX_FILE_BYTES} bytes")
+            raise ValueError(_("The file is larger than {count} bytes.").format(
+                count=_MAX_FILE_BYTES))
         store = parse_store(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:  # includes JSON and Unicode errors
+    except Exception as exc:  # noqa: BLE001 - a user file must never break terminals
         logger.warning("Cannot load highlight profiles from %s: %s", path, exc)
         store = Store(error=_("Cannot read {path}: {error}").format(path=path, error=exc))
     _cache[path] = stamp, store
@@ -237,6 +271,10 @@ def load_store(path: Optional[Path] = None) -> Store:
 
 
 def _write(store: Store, path: Path) -> None:
+    data = dump_store(store).encode("utf-8")
+    if len(data) > _MAX_FILE_BYTES:  # the loader would reject it
+        raise ValueError(_("Custom highlighting would exceed {count} KiB; remove some rules.")
+                         .format(count=_MAX_FILE_BYTES // 1024))
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and load_store(path).error:
         # Never overwrite a file the user may still want to repair.
@@ -245,8 +283,8 @@ def _write(store: Store, path: Path) -> None:
         logger.warning("Moved unreadable highlight profiles to %s", backup)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".highlight_profiles.")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(dump_store(store))
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
         os.replace(tmp, path)
     except BaseException:
         os.unlink(tmp)
@@ -255,6 +293,8 @@ def _write(store: Store, path: Path) -> None:
 
 
 def _current(path: Optional[Path]) -> Tuple[Path, Store]:
+    """The store as it is on disk now: every save re-reads it, so a save only
+    loses a change another sshPilot process wrote in the same instant."""
     path = store_path() if path is None else path
     store = load_store(path)
     if store.error:
@@ -272,8 +312,10 @@ def save_profile(profile: CustomProfile, replacing: Optional[str] = None,
     from .terminal_highlight import check_profile  # it imports this module
 
     path, store = _current(path)
-    name = check_name(profile.name, [n for n in store.profiles if n != replacing])
-    profile = replace(profile, name=name)
+    name = check_name(profile.name, [*(n for n in store.profiles if n != replacing),
+                                     *reserved_names(PROFILE_LABELS)])
+    rules = tuple(replace(rule, description=rule.description.strip()) for rule in profile.rules)
+    profile = replace(profile, name=name, rules=rules)
     if len(profile.rules) > _MAX_RULES:
         raise ValueError(_("A profile can have at most {count} rules.").format(count=_MAX_RULES))
     if replacing is None and len(store.profiles) >= MAX_ENTRIES:
@@ -289,7 +331,8 @@ def save_theme(theme: CustomTheme, replacing: Optional[str] = None,
                path: Optional[Path] = None) -> CustomTheme:
     """Like :func:`save_profile`, for a colour theme."""
     path, store = _current(path)
-    name = check_name(theme.name, [n for n in store.themes if n != replacing])
+    name = check_name(theme.name, [*(n for n in store.themes if n != replacing),
+                                   *reserved_names(THEME_LABELS)])
     theme = replace(theme, name=name)
     if replacing is None and len(store.themes) >= MAX_ENTRIES:
         raise ValueError(_("At most {count} custom themes can be saved.").format(

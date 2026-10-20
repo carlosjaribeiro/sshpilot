@@ -789,7 +789,7 @@ class PreferencesWindow(Adw.Window):
         self._reload_highlight_rows()
         error = load_highlight_store().error
         if error:
-            GLib.idle_add(self._show_toast, error)
+            GLib.idle_add(self._show_plain_toast, error)
         terminal_page.add(group)
 
     def _add_highlight_buttons(self, row, kind, tooltips):
@@ -808,7 +808,7 @@ class PreferencesWindow(Adw.Window):
 
     def _reload_highlight_rows(self):
         """Rebuild both selectors from the built-ins plus the saved custom entries."""
-        from .highlight_profile_editor import profile_label, theme_label
+        from .highlight_editor_common import profile_label, theme_label
 
         store = load_highlight_store()
         self._highlight_syncing = True
@@ -851,9 +851,9 @@ class PreferencesWindow(Adw.Window):
             buttons['delete'].set_sensitive(custom_name(selected) is not None)
 
     def _on_highlight_button(self, _button, kind, action):
-        from .highlight_profile_editor import (
-            confirm_delete, open_profile_editor, open_theme_editor,
-        )
+        from .highlight_editor_common import confirm_delete
+        from .highlight_profile_editor import open_profile_editor
+        from .highlight_theme_editor import open_theme_editor
 
         selected = self._selected_highlight(kind)
         if selected is None:
@@ -870,10 +870,21 @@ class PreferencesWindow(Adw.Window):
             self._reload_highlight_rows()
 
         if action == 'delete':
-            confirm_delete(self, kind, custom_name(selected), on_deleted)
+            confirm_delete(self, kind, custom_name(selected), on_deleted,
+                           self._show_plain_toast)
         else:
             opener = open_profile_editor if kind == 'profile' else open_theme_editor
             opener(self, self.config, selected, on_saved, duplicate=action == 'duplicate')
+
+    def _show_plain_toast(self, message):
+        """Toast ``message`` as text: names and regex errors may hold ``<`` or ``&``."""
+        from .highlight_editor_common import plain_toast
+
+        try:
+            self.add_toast(plain_toast(message))
+        except Exception:
+            logger.info(message)
+        return False
 
     def on_highlight_enabled_changed(self, switch_row, _param):
         self.config.set_setting('terminal.highlight_enabled', switch_row.get_active())
