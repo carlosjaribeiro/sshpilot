@@ -985,7 +985,8 @@ def test_apply_config_sets_securecrt_theme():
         "terminal.highlight_theme": "light",
     }))
     assert (h.enabled, h.profile, h.theme) == (True, "cisco-securecrt", "light")
-    assert THEMES == ("securecrt", "dark", "light", "high-contrast", "terminal-palette")
+    assert THEMES == ("securecrt", "dark", "light", "high-contrast", "terminal-palette",
+                      "securecrt-dark")
 
 
 def test_highlight_defaults_and_preferences_handlers():
@@ -1234,7 +1235,8 @@ def test_compile_cache_ignores_theme_for_legacy_profiles():
     Highlighter("cisco-securecrt", theme="dark")
     Highlighter("cisco-securecrt", theme="light")
     assert sorted(highlight._COMPILED) == [
-        ("cisco-securecrt", "dark"), ("cisco-securecrt", "light"), ("junos", ""),
+        ("cisco-securecrt", "dark", False), ("cisco-securecrt", "light", False),
+        ("junos", "", False),
     ]
 
 
@@ -1308,32 +1310,29 @@ def test_securecrt_golden_screenshot_colours_follow_the_rule_file():
     assert not h.pending  # the prompt is shown at once
     assert strip(out) == SCREENSHOT
     bs = b"\x08" * 10
+    # Whole words only: no run starts or ends inside a word ("h" in "authentication").
     assert _runs(out) == [
         (b"aaa", MISC), (b" new-model\r\n", None),
-        # 'h' (misc "H"), "on " (good "on.?"), "up " (good "up.?(?:\x20|$)")
-        (b"aaa", MISC), (b" aut", None), (b"h", MISC), (b"enticati", None),
-        (b"on ", GREEN), (b"login default gro", None), (b"up ", GREEN),
-        (b"radius ", None), (b"local", MISC), (b"\r\n", None),
-        # ".*thernet..." paints the whole line; later misc "interface" and "H" win
-        (b"interface", MISC), (b" GigabitEt", IFACE), (b"h", MISC),
-        (b"ernet0/10", IFACE), (b"\r\n switc", None), (b"hport", MISC), (b" ", None),
+        (b"aaa", MISC), (b" authentication login default group radius ", None),
+        (b"local", MISC), (b"\r\n", None),
+        # ".*thernet..." paints the whole line; the later misc "interface" wins
+        (b"interface", MISC), (b" GigabitEthernet0/10", IFACE),
+        (b"\r\n switchport ", None),
         (b"trunk", RED), (b" allowed ", None), (b"vlan", MISC), (b" 1-200\r\n", None),
         (b"snmp-server community public RO", SERVICES), (b"\r\n", None),
         (b"!", REMARK), (b"\r\n", None),
         (b" --More-- ", RED),
-        (bs + b" " * 10 + bs + b"ip ", None), (b"name", MISC), (b"-ser", None),
-        (b"v", MISC), (b"er ", None), (b"8.8.8.8", IP), (b"\r\n", None),
-        # ".*down.?" paints the line red; syslog tag, "Interface", "H" override
+        (bs + b" " * 10 + bs + b"ip ", None), (b"name", MISC), (b"-server ", None),
+        (b"8.8.8.8", IP), (b"\r\n", None),
+        # ".*down.?" paints the line red; syslog tag and "Interface" override
         (b"%LINK-3-UPDOWN:", SYSLOG), (b" ", RED), (b"Interface", MISC),
-        (b" GigabitEt", RED), (b"h", MISC), (b"ernet0/3, c", RED), (b"h", MISC),
-        (b"anged state to down", RED), (b"\r\n", None),
+        (b" GigabitEthernet0/3, changed state to down", RED), (b"\r\n", None),
         (b"%LINEPROTO-5-UPDOWN:", SYSLOG), (b" Line ", IFACE),
         (b"protocol", MISC), (b" ", IFACE), (b"on ", GREEN),
-        (b"Interface", MISC), (b" GigabitEt", IFACE), (b"h", MISC),
-        (b"ernet0/3, ", IFACE), (b"c", None), (b"h", MISC),
-        (b"anged state to ", None), (b"up", GREEN), (b"\r\n", None),
-        (b"%SW_MATM-4-MACFLAP_NOTIF:", SYSLOG), (b" ", None), (b"H", MISC),
-        (b"ost ", None), (b"ec8e.7717.60c9", MAC), (b" in ", None), (b"vlan", MISC),
+        (b"Interface", MISC), (b" GigabitEthernet0/3, ", IFACE),
+        (b"changed state to ", None), (b"up", GREEN), (b"\r\n", None),
+        (b"%SW_MATM-4-MACFLAP_NOTIF:", SYSLOG), (b" Host ", None),
+        (b"ec8e.7717.60c9", MAC), (b" in ", None), (b"vlan", MISC),
         (b" 668 is flapping\r\n", None),
         (b"SW-ACCESS-01#", IFACE),
     ]
@@ -1404,22 +1403,23 @@ def test_securecrt_split_invariance():
 
 
 def test_securecrt_rules_are_the_file_rules_unmodified():
+    from sshpilot.terminal_highlight_securecrt import whole_word
+
     source = _fixture_rules()
     assert len(source) == len(SECURECRT_RULES) == 51
     assert [(rule.source, rule.pattern) for rule in SECURECRT_RULES] == [
         (pattern, pattern) for pattern, _ in source
     ]
     compiled = compile_rules("securecrt")
-    assert [rule.regex.pattern for rule in compiled] == [pattern for pattern, _ in source]
+    # the file's patterns, unmodified, inside the whole-word guard
+    assert [rule.regex.pattern for rule in compiled] == [whole_word(pattern) for pattern, _ in source]
     assert all(rule.regex.flags & re.IGNORECASE for rule in compiled)
 
 
-def test_securecrt_short_words_match_anywhere_like_the_source():
-    # The source "no", "on", "des", "SN" have no word boundaries; neither do we.
-    assert _runs(run("cisco-securecrt", b"3des snooping\r\n")) == [
-        (b"3", None), (b"des", RED), (b" ", None), (b"sn", MISC), (b"o", RED),
-        (b"oping\r\n", None),
-    ]
+def test_securecrt_short_words_match_whole_words_only():
+    # "no", "on", "des", "SN" are rules of the source; inside a bigger word they are ignored.
+    assert _runs(run("cisco-securecrt", b"3des snooping\r\n")) == [(b"3des snooping\r\n", None)]
+    assert _runs(run("cisco-securecrt", b"des\r\n")) == [(b"des", RED), (b"\r\n", None)]
 
 
 def test_securecrt_unfinished_line_waits_for_idle_or_prompt():

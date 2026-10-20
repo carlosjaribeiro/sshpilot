@@ -33,6 +33,18 @@ white background) so the terminal theme owns the actual colours. Themes apply
 to this profile and to custom profiles; the setting is greyed out for the
 others. Custom themes (copies with your own colours) are listed after these.
 
+`securecrt` is designed for a light background (SecureCRT's own `Cisco Words`;
+VanDyke ships a separate `DkBg` list for dark ones). `securecrt-dark` raises the
+lightness of every `securecrt` colour to at least 0.62 and keeps hue and
+saturation. While the theme is `securecrt` and the terminal theme's background
+is dark, `securecrt-dark` is used automatically; the saved setting stays
+`securecrt`, and choosing any other theme turns this off.
+
+*Bold Highlighted Text* (`terminal.highlight_bold`, default on) paints every
+highlighted run of the *Cisco (SecureCRT-style)* profile bold, as SecureCRT does
+with its session-wide bold option (the file only flags the progress rule). Bold
+the remote has set is kept, not restarted or cancelled. Other profiles ignore it.
+
 ## Editing profiles and themes
 
 Built-in profiles and themes are read-only. To make your own, open
@@ -183,6 +195,17 @@ therefore the same however the stream is split into chunks. Every line of up
 to 4096 bytes is matched whole (the two exceptions are under **Line cap**), so
 `.*thernet…`, `.*down.?`, `.*-more-.*`, `snmp.*`, the `^` prompt rules and `$`
 behave as in SecureCRT. Visible bytes never change.
+
+**Whole words.** A match may not start or end inside a word: when its first
+(last) character is a letter, digit or `_`, the character before (after) the
+match must not be one. Symbol edges (`#`, `.`, `,`) are exempt, so the prompt
+`SW#show` and `bits/sec,` still match. This is a lookaround added around every
+rule when compiled (`whole_word`), not a post-filter, so a rule can backtrack to
+an alternative that fits. It stops `v` in `server`, `h` in `dhcp`, `no` in
+`none`. Evidence: the list's "gray keywords work around symbol delimited words"
+comments and SecureCRT's behaviour on a real `show running-config`; VanDyke does
+not document how `Regex Line Mode=0` delimits words (confidence: medium). The
+`_` counts as a word character, so `ISE_RADIUS` stays one word.
 
 Rule file format. The reference is the user's original SecureCRT export
 (`tests/data/securecrt-cisco-words.original.ini`), which holds two lists of 71

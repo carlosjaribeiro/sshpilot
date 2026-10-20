@@ -786,6 +786,18 @@ class PreferencesWindow(Adw.Window):
         self.highlight_theme_row.connect('notify::selected', self.on_highlight_theme_changed)
         group.add(self.highlight_theme_row)
 
+        self.highlight_bold_row = Adw.SwitchRow()
+        self.highlight_bold_row.set_title(_("Bold Highlighted Text"))
+        self.highlight_bold_row.set_subtitle(_("Cisco (SecureCRT-style) profile only"))
+        self.highlight_bold_row.set_active(
+            bool(self.config.get_setting('terminal.highlight_bold', True))
+        )
+        self.highlight_bold_row.connect(
+            'notify::active',
+            lambda row, _param: self.config.set_setting('terminal.highlight_bold', row.get_active()),
+        )
+        group.add(self.highlight_bold_row)
+
         self._reload_highlight_rows()
         error = load_highlight_store().error
         if error:
@@ -841,6 +853,9 @@ class PreferencesWindow(Adw.Window):
     def _sync_highlight_selection(self, kind, selected):
         """Grey out what does not apply to the selected profile or theme."""
         theme_row = getattr(self, 'highlight_theme_row', None)
+        bold_row = getattr(self, 'highlight_bold_row', None)
+        if kind == 'profile' and bold_row is not None:
+            bold_row.set_sensitive(selected == 'cisco-securecrt')
         if kind == 'profile' and theme_row is not None:
             # Legacy profiles keep their palette colours; themes colour the others.
             theme_row.set_sensitive(

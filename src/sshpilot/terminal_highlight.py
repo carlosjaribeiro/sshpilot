@@ -66,6 +66,7 @@ from .terminal_highlight_securecrt import (
     load_rules,
     normalize_theme,
     style_bytes,
+    whole_word,
 )
 
 PROFILES = ("generic", "cisco-ios", "cisco-securecrt", "junos", "huawei-vrp")
@@ -311,7 +312,7 @@ def _compile_custom(profile: CustomProfile, theme: ThemeRef) -> Tuple[CompiledRu
             pattern, validate = _numbered(number, rule)
             opening, closing = style_bytes(rule.colour, colours, rule.bold)
             flags = 0 if rule.match_case else re.IGNORECASE
-            compiled.append(CompiledRule(re.compile(pattern, flags), opening, closing,
+            compiled.append(CompiledRule(re.compile(whole_word(pattern), flags), opening, closing,
                                          rule.bold, validate))
     return tuple(compiled)
 
@@ -352,11 +353,11 @@ def preview_runs(profile: CustomProfile, theme: ThemeRef, line: str) -> List[Run
     return preview_lines(profile, theme, [line])[0]
 
 
-def _compile(profile: ProfileRef, theme: ThemeRef) -> _Compiled:
+def _compile(profile: ProfileRef, theme: ThemeRef, bold: bool = False) -> _Compiled:
     if isinstance(profile, CustomProfile):
         return _Compiled(None, {}, {}, _compile_custom(profile, theme))
     if profile == "cisco-securecrt":
-        return _Compiled(None, {}, {}, compile_rules(theme_colours(theme)))
+        return _Compiled(None, {}, {}, compile_rules(theme_colours(theme), bold))
     rules = _rules(profile)
     pattern = "|".join(f"(?P<{r.name}>{r.pattern})" for r in rules)
     return _Compiled(
@@ -369,7 +370,7 @@ def _compile(profile: ProfileRef, theme: ThemeRef) -> _Compiled:
 
 # Only the SecureCRT and custom profiles have themes; legacy profiles share one
 # entry. Custom profiles and themes are keyed by content, so an edit compiles anew.
-_COMPILED: Dict[Tuple[ProfileRef, ThemeRef], _Compiled] = {}
+_COMPILED: Dict[Tuple[ProfileRef, ThemeRef, bool], _Compiled] = {}
 _COMPILED_MAX = 64
 
 _NEXT_RE = re.compile(rb"\x1b|\xc2(?:[\x80-\x9f]|\Z)")
@@ -407,17 +408,19 @@ class Highlighter:
     """Stateful stream rewriter; one instance per terminal."""
 
     def __init__(self, profile: ProfileRef = "generic", enabled: bool = True,
-                 theme: ThemeRef = "securecrt",
+                 theme: ThemeRef = "securecrt", bold: bool = False,
                  clock: Callable[[], float] = time.monotonic) -> None:
         self.enabled = enabled
         self._clock = clock
         self._fed_at = 0.0
         self.warning: Optional[str] = None  # set by apply_config on a fallback
         self.theme = theme if isinstance(theme, CustomTheme) else normalize_theme(theme)
+        self.bold = bold
         self.set_profile(profile)
         self.reset()
 
-    def set_profile(self, profile: ProfileRef, theme: Optional[ThemeRef] = None) -> None:
+    def set_profile(self, profile: ProfileRef, theme: Optional[ThemeRef] = None,
+                    bold: Optional[bool] = None) -> None:
         """Switch rules; nothing changes unless compiling succeeded.
 
         Raises ValueError for a custom profile with an unusable rule.
@@ -428,27 +431,30 @@ class Highlighter:
             theme = self.theme
         elif not isinstance(theme, CustomTheme):
             theme = normalize_theme(theme)
+        if bold is None:
+            bold = self.bold
         themed = isinstance(profile, CustomProfile) or profile == "cisco-securecrt"
-        key = profile, theme if themed else ""
+        # Forced bold is a SecureCRT-profile option; custom rules carry their own.
+        key = profile, theme if themed else "", bold and profile == "cisco-securecrt"
         if key not in _COMPILED:
             compiled = _compile(*key)
             if len(_COMPILED) >= _COMPILED_MAX:
                 _COMPILED.clear()
             _COMPILED[key] = compiled
-        self.profile, self.theme, self._compiled = profile, theme, _COMPILED[key]
+        self.profile, self.theme, self.bold, self._compiled = profile, theme, bold, _COMPILED[key]
 
     def configure(self, enabled: bool, profile: ProfileRef,
-                  theme: Optional[ThemeRef] = None) -> bytes:
+                  theme: Optional[ThemeRef] = None, bold: Optional[bool] = None) -> bytes:
         """Apply settings without losing stream state.
 
         Returns bytes that were held back and must now be displayed unchanged
         (non-empty only when switching off mid-escape, or when a change drops
         a held SecureCRT line).
         """
-        old = self.enabled, self.profile, self.theme
-        self.set_profile(profile, theme)
+        old = self.enabled, self.profile, self.theme, self.bold
+        self.set_profile(profile, theme, bold)
         flushed = b""
-        if old != (enabled, self.profile, self.theme):
+        if old != (enabled, self.profile, self.theme, self.bold):
             # A held line goes out as it is: its rules or the switch are gone.
             flushed, self._segs, self._prefix, self._line_len = (
                 b"".join(data for data, _, _ in self._segs), [], b"", 0)
@@ -784,6 +790,16 @@ def _byte_owners(line: bytes, rules: Tuple[CompiledRule, ...]) -> List[Optional[
             for _ in range(len(char.encode("utf-8", "surrogateescape")))]
 
 
+def _dark_background(config: object) -> bool:
+    """Whether the terminal background (``#RRGGBB``) is dark; False if unknown."""
+    try:
+        value = config.get_terminal_profile()["background"]  # type: ignore[attr-defined]
+        red, green, blue = (int(value[i:i + 2], 16) for i in (1, 3, 5))
+    except Exception:
+        return False
+    return 0.299 * red + 0.587 * green + 0.114 * blue < 128
+
+
 def apply_config(highlighter: Highlighter, config: object,
                  store: Optional[Store] = None) -> bytes:
     """Sync ``highlighter`` with the terminal highlight settings.
@@ -814,11 +830,14 @@ def apply_config(highlighter: Highlighter, config: object,
         get("terminal.highlight_theme", "securecrt"), store.themes, highlighter.theme,
         normalize_theme, _("Highlight theme “{name}” is unavailable; keeping the previous one."),
     )
+    if theme == "securecrt" and _dark_background(config):
+        theme = "securecrt-dark"  # its colours are made for a light background
+    bold = get("terminal.highlight_bold", True) is True
     try:
-        held = highlighter.configure(enabled, profile, theme)
+        held = highlighter.configure(enabled, profile, theme, bold)
     except ValueError as exc:
         warnings.append(_("Highlight profile “{name}” cannot be used: {error}").format(
             name=getattr(profile, "name", profile), error=exc))
-        held = highlighter.configure(enabled, highlighter.profile, theme)
+        held = highlighter.configure(enabled, highlighter.profile, theme, bold)
     highlighter.warning = " ".join(warnings) or None
     return held

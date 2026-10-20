@@ -45,6 +45,8 @@ def get_default_config() -> Dict[str, Any]:
             'highlight_enabled': False,
             'highlight_profile': 'generic',
             'highlight_theme': 'securecrt',
+            # Bold highlighted text in the Cisco (SecureCRT-style) profile.
+            'highlight_bold': True,
             'audible_bell': False,
             'term': None,
             'pass_through_mode': False,

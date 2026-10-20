@@ -5410,7 +5410,7 @@ class TerminalWidget(Gtk.Box):
     def _on_config_setting_changed(self, _config, key, value):
         if key in (
             'terminal.highlight_enabled', 'terminal.highlight_profile',
-            'terminal.highlight_theme',
+            'terminal.highlight_theme', 'terminal.highlight_bold', 'terminal.theme',
         ):
             GLib.idle_add(self._apply_highlight_settings)
         elif key == 'terminal.pass_through_mode':

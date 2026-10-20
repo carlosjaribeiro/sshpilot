@@ -287,7 +287,8 @@ def test_custom_theme_persists_and_recolours_its_roles(config_dir):
 
     h = Highlighter(enabled=False)
     apply_config(h, _Config(**{"terminal.highlight_profile": "cisco-securecrt",
-                               "terminal.highlight_theme": custom_id("Mine")}))
+                               "terminal.highlight_theme": custom_id("Mine"),
+                               "terminal.highlight_bold": False}))
     assert h.theme == theme
     out = h.feed(b"192.168.1.1 up\n")
     assert b"\x1b[38;2;18;52;86m192.168.1.1\x1b[39m" in out  # overridden role

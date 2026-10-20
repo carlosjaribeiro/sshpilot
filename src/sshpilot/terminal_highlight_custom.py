@@ -62,6 +62,7 @@ PROFILE_LABELS = {
 }
 THEME_LABELS = {
     "securecrt": N_("SecureCRT"),
+    "securecrt-dark": N_("SecureCRT (dark background)"),
     "dark": N_("Dark"),
     "light": N_("Light"),
     "high-contrast": N_("High Contrast"),

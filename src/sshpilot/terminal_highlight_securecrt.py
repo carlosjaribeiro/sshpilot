@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import csv
 import logging
+import colorsys
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -23,7 +24,7 @@ from .platform.paths import get_config_dir
 
 logger = logging.getLogger(__name__)
 
-THEMES = ("securecrt", "dark", "light", "high-contrast", "terminal-palette")
+THEMES = ("securecrt", "dark", "light", "high-contrast", "terminal-palette", "securecrt-dark")
 
 RGB = Tuple[int, int, int]
 Colour = Union[int, RGB, None]
@@ -98,6 +99,20 @@ _SECURECRT: Dict[str, Colour] = {
     "default": None,
 }
 
+
+
+def _on_dark(colour: Colour, lightness: float = 0.62) -> Colour:
+    """Lift a colour designed for a light background to be readable on black,
+    keeping its hue and saturation (greys keep their grey)."""
+    if not isinstance(colour, tuple):
+        return colour
+    hue, light, sat = colorsys.rgb_to_hls(*(c / 255 for c in colour))
+    return tuple(round(c * 255) for c in colorsys.hls_to_rgb(hue, max(light, lightness), sat))
+
+
+# The SecureCRT colours with the lightness raised: "Cisco Words - DkBg" in spirit.
+_SECURECRT_DARK: Dict[str, Colour] = {role: _on_dark(c) for role, c in _SECURECRT.items()}
+
 _DARK: Dict[str, Colour] = {
     **_SECURECRT,
     "quoted": (180, 180, 180), "prompt_enable": (80, 170, 255),
@@ -143,6 +158,7 @@ _PALETTE: Dict[str, Colour] = {
 
 THEME_COLOURS = {
     "securecrt": _SECURECRT,
+    "securecrt-dark": _SECURECRT_DARK,
     "dark": _DARK,
     "light": _LIGHT,
     "high-contrast": _HIGH_CONTRAST,
@@ -379,8 +395,11 @@ def load_rules(path: Optional[Path] = None) -> List[SecureCRTRule]:
     return rules
 
 
-def compile_rules(theme: Theme) -> Tuple[CompiledRule, ...]:
-    """Compile the built-in profile plus the optional user override file."""
+def compile_rules(theme: Theme, bold: bool = False) -> Tuple[CompiledRule, ...]:
+    """Compile the built-in profile plus the optional user override file.
+
+    ``bold`` paints every highlighted run bold (SecureCRT's global option).
+    """
     try:
         custom = load_rules()
     except Exception:  # a user file must never break the terminal
@@ -388,12 +407,28 @@ def compile_rules(theme: Theme) -> Tuple[CompiledRule, ...]:
         custom = []
     compiled = []
     for rule in (*SECURECRT_RULES, *custom):
-        opening, closing = style_bytes(rule.role, theme, rule.bold)
+        rule_bold = bold or rule.bold
+        opening, closing = style_bytes(rule.role, theme, rule_bold)
         compiled.append(CompiledRule(
-            re.compile(rule.pattern, 0 if rule.match_case else re.IGNORECASE),
-            opening, closing, rule.bold,
+            re.compile(whole_word(rule.pattern), 0 if rule.match_case else re.IGNORECASE),
+            opening, closing, rule_bold,
         ))
     return tuple(compiled)
+
+
+_W = "0-9A-Za-z_"
+# A match may not start/end inside a word: a word character at a match edge needs a
+# non-word neighbour outside it. Edges that are symbols (``#``, ``.``) are free.
+_WHOLE_WORD = (rf"(?:(?<![{_W}])|(?=[^{_W}]))(?:{{}})(?:(?![{_W}])|(?<=[^{_W}]))")
+
+
+def whole_word(pattern: str) -> str:
+    """Make ``pattern`` match whole words, like SecureCRT (see ``docs/highlighting.md``).
+
+    A lookaround rather than a post-filter, so the regex still backtracks to
+    an alternative that fits (``shut.*`` after a word start, not ``no`` in ``none``).
+    """
+    return _WHOLE_WORD.format(pattern)
 
 
 def line_owners(line: str, rules: Tuple[CompiledRule, ...]) -> List[Optional[int]]:
