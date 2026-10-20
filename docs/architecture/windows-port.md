@@ -375,8 +375,9 @@ imported at module level across `main.py`, `terminal.py`,
 Ctrl+Alt press that produces a printable non-letter is therefore sent as text.
 Otherwise AltGr+Q (`@` on a German layout) would become Ctrl+@ (NUL).
 
-**Limits.** pyte has no hyperlinks (OSC 8), no reflow on resize, no sixel,
-and no true-blink. Rendering is per-run Pango layouts, which is fine for
+**Limits.** pyte has no hyperlinks (OSC 8), no sixel, and no true-blink.
+Reflow on resize is done by the model, for the scrollback only under ConPTY
+(terminal-reflow.md). Rendering is per-run Pango layouts, which is fine for
 interactive use but slower than VTE on bulk output.
 
 **CSI forms pyte mis-parses.** pyte 0.8.2 has these parser gaps:
@@ -456,8 +457,10 @@ Plain text is slower than SGR-heavy text on libvterm because the Python
 itself happens in C.
 
 `tests/test_pyte_terminal_model.py` runs every model test against both
-models through a `make_model` fixture. The alternate-screen resize tests are
-`xfail` for pyte.
+models through a `make_model` fixture. The alternate-screen resize tests
+pass for pyte on raw streams, where the main screen is rebuilt when the
+alternate screen exits (terminal-reflow.md); under ConPTY pyte still drops
+those rows.
 
 **Full-screen apps.** vim 9, GNU less and htop were recorded under a Linux
 PTY in WSL with 80x24 → larger → smaller resizes inside the alternate screen,
@@ -745,7 +748,9 @@ Done (details in windows-implementation-plan.md and the sections above):
   also rewraps on-screen rows only; scrollback would need a Python-side
   rewrap keyed on `sb_pushline4`'s continuation flag (available in the
   patched build). On Linux/macOS the built-in backend is opt-in and VTE
-  reflows. Revisit together with ConPTY passthrough mode.
+  reflows. Revisit together with ConPTY passthrough mode. The pyte model
+  now rewraps the scrollback (and the screen on raw streams only), which
+  ConPTY never addresses (terminal-reflow.md).
 - **Retiring MSYS2 and pywinpty (plan phase 8).** Waits for the first shipped
   Windows release: then remove the MSYS2 section, the
   `SSHPILOT_CONPTY_BACKEND=pywinpty` switch and the pywinpty dependency.
