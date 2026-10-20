@@ -17,7 +17,7 @@ from sshpilot.wol import (
 def _wol_action_host(metadata):
     connection = SimpleNamespace(
         nickname="server",
-        hostname="192.168.1.20",
+        hostname="192.0.2.20",
     )
     return SimpleNamespace(
         config=object(),
@@ -73,7 +73,7 @@ def test_wol_action_sends_stored_connection_metadata():
         "aa:bb:cc:dd:ee:ff",
         broadcast_ip="192.168.1.255",
         port=7,
-        host="192.168.1.20",
+        host="192.0.2.20",
     )
 
 
@@ -87,7 +87,7 @@ def test_wol_action_uses_defaults_for_optional_metadata():
         "aa:bb:cc:dd:ee:ff",
         broadcast_ip=None,
         port=9,
-        host="192.168.1.20",
+        host="192.0.2.20",
     )
 
 
