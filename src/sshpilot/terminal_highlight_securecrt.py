@@ -110,6 +110,9 @@ def _on_dark(colour: Colour, lightness: float = 0.62) -> Colour:
 
 # The SecureCRT colours with the lightness raised: "Cisco Words - DkBg" in spirit.
 _SECURECRT_DARK: Dict[str, Colour] = {role: _on_dark(c) for role, c in _SECURECRT.items()}
+# Lifting maroon (128,0,0) and red (255,0,0) to the same lightness made them both
+# (255,61,61); keep bad words vivid and misc words a distinctly darker red.
+_SECURECRT_DARK.update(bad=(255, 48, 48), important=(255, 48, 48), misc=(184, 40, 40))
 
 _DARK: Dict[str, Colour] = {
     **_SECURECRT,

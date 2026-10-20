@@ -96,9 +96,29 @@ def test_securecrt_dark_is_readable_and_keeps_hue():
             continue
         h0, l0, s0 = colorsys.rgb_to_hls(*(c / 255 for c in original))
         h1, l1, s1 = colorsys.rgb_to_hls(*(c / 255 for c in dark[role]))
-        assert l1 >= 0.55, role
+        # misc is deliberately a darker red than bad (see test below); it is
+        # held to the 3:1 contrast floor instead of the lightness floor.
+        assert l1 >= 0.55 or role == "misc", role
         if s0 and l0 < 0.95:
             assert abs(h0 - h1) < 0.02 or abs(abs(h0 - h1) - 1) < 0.02, role
+
+
+def _contrast(a, b=(0, 0, 0)):
+    def lum(c):
+        r, g, b_ = (v / 255 / 12.92 if v / 255 <= 0.03928 else ((v / 255 + 0.055) / 1.055) ** 2.4
+                    for v in c)
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b_
+    hi, lo = sorted((lum(a), lum(b)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def test_securecrt_dark_bad_words_differ_from_misc_words():
+    dark = THEME_COLOURS["securecrt-dark"]
+    assert dark["bad"] == dark["important"] != dark["misc"]
+    assert _contrast(dark["bad"]) >= 4.5
+    assert _contrast(dark["misc"]) >= 3.0
+    assert _contrast(dark["bad"], dark["misc"]) >= 1.5
+    assert dark["bad"][0] > dark["misc"][0] and dark["bad"][1] > dark["misc"][1]
 
 
 class _Config:

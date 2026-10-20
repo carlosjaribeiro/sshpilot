@@ -37,7 +37,8 @@ others. Custom themes (copies with your own colours) are listed after these.
 `securecrt` is designed for a light background (SecureCRT's own `Cisco Words`;
 VanDyke ships a separate `DkBg` list for dark ones). `securecrt-dark` is a
 regular, explicitly selectable theme: every `securecrt` colour with its
-lightness raised to at least 0.62, hue and saturation kept. It is chosen
+lightness raised to at least 0.62, hue and saturation kept (except `bad`/`important`
+= `#FF3030` and `misc` = `#B82828`, so the two reds stay distinct). It is chosen
 automatically only when the saved theme is `securecrt` and the terminal theme's
 background is dark (`#RGB` or `#RRGGBB`, luminance below 50%); the saved setting
 stays `securecrt`. Choosing `securecrt-dark` yourself, or any other theme
