@@ -4,7 +4,7 @@
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path -Parent $PSScriptRoot)
 
-$features = "feat/securecrt-style-profile", "feat/highlight-profile-editor", "feat/securecrt-r4", "feat/session-logging", "feat/securecrt-session-import"
+$features = "feat/securecrt-style-profile", "feat/highlight-profile-editor", "feat/securecrt-r4", "feat/session-logging", "feat/securecrt-session-import", "feat/terminal-reflow"
 $py = if (Test-Path ".venv-win\Scripts\python.exe") { ".venv-win\Scripts\python.exe" } else { "python" }
 
 function Git { & git @args; if ($LASTEXITCODE -ne 0) { throw "git $args failed" } }
@@ -36,7 +36,8 @@ if ($LASTEXITCODE -ne 0) { throw "ruff failed" }
 & $py -m pytest -q tests/test_terminal_highlight.py tests/test_terminal_session_log.py `
     tests/test_terminal_highlight_custom.py tests/test_terminal_highlight_words.py `
     tests/test_terminal_session_log_widget.py tests/core/test_securecrt_to_asbru.py `
-    tests/test_highlight_session_log_integration.py
+    tests/test_highlight_session_log_integration.py tests/test_pyte_terminal_reflow.py `
+    tests/test_pyte_terminal_model.py tests/test_pyte_csi_normalizer.py
 if ($LASTEXITCODE -ne 0) { throw "tests failed" }
 
 Write-Host "`nChanged since ${before}:"

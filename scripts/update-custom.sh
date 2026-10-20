@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-FEATURES=(feat/securecrt-style-profile feat/highlight-profile-editor feat/securecrt-r4 feat/session-logging feat/securecrt-session-import)
+FEATURES=(feat/securecrt-style-profile feat/highlight-profile-editor feat/securecrt-r4 feat/session-logging feat/securecrt-session-import feat/terminal-reflow)
 PY="${PYTHON:-python3}"
 
 [ "$(git rev-parse --abbrev-ref HEAD)" = carlos-custom ] || { echo "Check out carlos-custom first." >&2; exit 1; }
@@ -36,7 +36,8 @@ done
 "$PY" -m pytest -q tests/test_terminal_highlight.py tests/test_terminal_session_log.py \
     tests/test_terminal_highlight_custom.py tests/test_terminal_highlight_words.py \
     tests/test_terminal_session_log_widget.py tests/core/test_securecrt_to_asbru.py \
-    tests/test_highlight_session_log_integration.py
+    tests/test_highlight_session_log_integration.py tests/test_pyte_terminal_reflow.py \
+    tests/test_pyte_terminal_model.py tests/test_pyte_csi_normalizer.py
 
 echo
 echo "Changed since $before:"
