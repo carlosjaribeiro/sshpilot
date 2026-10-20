@@ -46,7 +46,29 @@ off) says the console relays the stream and sends nothing after a resize, so
 the model still owns its screen. `PyteTerminalBackend._follow_conpty` sets
 both for daemon sessions and local shells on Windows; `passthrough` is on when
 `conpty_passes_through()` finds the bundled conpty.dll (the same lookup the
-local daemon makes) and `terminal.reflow_visible_screen` is not false.
+local daemon makes) with `OpenConsole.exe` beside it, and
+`terminal.reflow_visible_screen` is not false. Without `OpenConsole.exe`
+conpty.dll starts the inbox conhost, which repaints (measured).
+`SSHPILOT_CONPTY_BACKEND=pywinpty` only affects daemon sessions; local
+shells always use the ctypes binding.
+
+The window resolves the DLL itself; it cannot ask the daemon. They agree
+when the app starts the daemon: the daemon inherits the window's environment
+(`SSHPILOT_CONPTY_DLL` included) and runs from the same install, and the
+lookup uses absolute paths (the source checkout, or the frozen exe's
+directory and `_MEIPASS`), never the working directory. A daemon started
+on its own with another environment, or left running from another install,
+can differ. Each terminal logs one INFO line, `ConPTY terminal: model=…
+pull_history_on_grow=… passthrough=… reflow_visible_screen=…
+conpty_passes_through=… source=…`, to check. The libvterm model, the
+Windows default, does not reflow the screen; with it the log adds a line
+pointing to the pyte model, and so does the libvterm entry's subtitle in
+Preferences > Terminal > Terminal Backend.
+
+Rows the main screen pushes into history when it comes back from the
+alternate screen count as `scrollback_pushes`, so a scrolled-back view stays
+on its text. A width change itself rewrites the history, and the view only
+clamps its offset then.
 
 ### Why the bundled conpty.dll can be reflowed
 
@@ -115,7 +137,9 @@ the last row, and wraps again at the new width:
 - combining characters are already merged into their base cell by pyte;
 - a short row that is not wrapped is reused as is;
 - the scrollback keeps its `maxlen`. A narrower width drops the oldest rows
-  first, as new output would.
+  first, as new output would. With `maxlen` 0 (no scrollback; the app always
+  configures 10000) rows that narrowing pushes off the top are gone, as in
+  xterm without scrollback.
 
 On a screen reflow the cursor stays on the same character (or the same
 blank after the text). Blank rows below the cursor are dropped. Then the

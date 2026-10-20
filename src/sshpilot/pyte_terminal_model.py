@@ -365,7 +365,10 @@ class EmulatorScreen(pyte.Screen):
             self._main_cursor = None
         if self._reflow_main_on_leave:
             self._reflow_main_on_leave = False
-            self._reflow_screen(self.lines, self.columns)
+            before = len(self.scrollback)
+            # Rows the rebuilt main screen puts into history count as pushes,
+            # so a scrolled-back view stays on its text.
+            self.scrollback_pushes += max(0, self._reflow_screen(self.lines, self.columns) - before)
         self.ensure_hbounds()
         self.ensure_vbounds()
         self.dirty.update(range(self.lines))
@@ -450,8 +453,11 @@ class EmulatorScreen(pyte.Screen):
         self.scrollback.clear()
         self.scrollback.extend(row if isinstance(row, _Row) else _Row(row, _continued(row)) for row in rows)
 
-    def _reflow_screen(self, lines: int, columns: int) -> None:
-        """Rewrap scrollback and screen together, keeping the cursor's text."""
+    def _reflow_screen(self, lines: int, columns: int) -> int:
+        """Rewrap scrollback and screen together, keeping the cursor's text.
+
+        Returns how many rows now sit above the screen.
+        """
 
         default = self.default_char
         # A main screen saved behind the alternate one can be taller.
@@ -489,6 +495,7 @@ class EmulatorScreen(pyte.Screen):
             self.buffer[y] = row
         self.cursor.y = cursor_row - top
         self.cursor.x = cursor_x
+        return top
 
     def _shift_up(self, count: int) -> None:
         moved = self._new_buffer()
