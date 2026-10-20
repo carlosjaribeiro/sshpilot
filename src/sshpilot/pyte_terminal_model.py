@@ -212,13 +212,63 @@ class EmulatorScreen(pyte.Screen):
         if self._drawing:
             self.buffer[self.cursor.y].continued = True
 
+    def _unlink(self, *rows: int) -> None:
+        for y in rows:
+            _set_continued(self.buffer.get(y), False)
+
+    def _edited(self, first: int, last: int) -> None:
+        """Cells ``first..last`` of the cursor row were erased or shifted.
+
+        A changed start breaks the row's link to the row above, a changed
+        end the next row's link to this one. ``draw`` writes the start of a
+        row it has just wrapped into, so it keeps that link.
+        """
+
+        if first <= 0 and not self._drawing:
+            self._unlink(self.cursor.y)
+        if last >= self.columns - 1:
+            self._unlink(self.cursor.y + 1)
+
     def erase_in_line(self, how: int = 0, private: bool = False) -> None:
         super().erase_in_line(how, private)
-        # The erased part no longer joins the neighbouring row.
-        if how in (0, 2):
-            _set_continued(self.buffer.get(self.cursor.y + 1), False)
-        if how in (1, 2):
-            _set_continued(self.buffer.get(self.cursor.y), False)
+        x = self.cursor.x
+        self._edited(0 if how else x, x if how == 1 else self.columns - 1)
+
+    def erase_characters(self, count: Optional[int] = None) -> None:
+        super().erase_characters(count)
+        self._edited(self.cursor.x, self.cursor.x + (count or 1) - 1)
+
+    def delete_characters(self, count: Optional[int] = None) -> None:
+        super().delete_characters(count)
+        self._edited(self.cursor.x, self.columns - 1)
+
+    def insert_characters(self, count: Optional[int] = None) -> None:
+        super().insert_characters(count)
+        # pyte keeps one pushed-off cell at ``columns``; reflow would show it.
+        self.buffer[self.cursor.y].pop(self.columns, None)
+        self._edited(self.cursor.x, self.columns - 1)
+
+    def insert_lines(self, count: Optional[int] = None) -> None:
+        top, bottom = self.margins or (0, self.lines - 1)
+        y = self.cursor.y
+        super().insert_lines(count)
+        if top <= y <= bottom:
+            # The moved rows and the row below the region have new rows above.
+            self._unlink(y + (count or 1), bottom + 1)
+
+    def delete_lines(self, count: Optional[int] = None) -> None:
+        top, bottom = self.margins or (0, self.lines - 1)
+        y = self.cursor.y
+        super().delete_lines(count)
+        if top <= y <= bottom:
+            self._unlink(y, bottom + 1)
+
+    def reverse_index(self) -> None:
+        top, bottom = self.margins or (0, self.lines - 1)
+        scrolls = self.cursor.y == top
+        super().reverse_index()
+        if scrolls:
+            self._unlink(top + 1, bottom + 1)
 
     def write_process_input(self, data: str) -> None:
         if self.on_reply is not None:
@@ -238,9 +288,15 @@ class EmulatorScreen(pyte.Screen):
 
     def index(self) -> None:
         top, bottom = self.margins or (0, self.lines - 1)
-        if self.cursor.y == bottom and top == 0:
+        scrolls = self.cursor.y == bottom
+        if scrolls and top == 0:
             self._push_scrollback(self.buffer[0])
         super().index()
+        if scrolls:
+            # Inside a scroll region the row above ``top`` was discarded (it
+            # went to the scrollback only for ``top == 0``), and the row below
+            # ``bottom`` now follows a different row.
+            self._unlink(bottom + 1, *([top] if top else []))
 
     def erase_in_display(self, how: int = 0, *args, **kwargs) -> None:
         if how == 3:

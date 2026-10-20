@@ -15,8 +15,16 @@ Each row has a `continued` flag: "this row continues the row above".
   marks the span, and `linefeed()` flags the new row only inside it.
 - An explicit CR/LF never sets it, even after a line that fills the row
   exactly.
-- Erasing clears it at the erased junction (EL 0/1/2, ED 0/1/2), so a screen
-  that is cleared and redrawn does not join stale rows.
+- Editing breaks the link at the edited edge. If an erase or shift (EL, ED,
+  ECH, DCH, ICH) changes the first column of a row, that row stops
+  continuing the row above. If it changes the last column, the next row
+  stops continuing it. Writing over cells in place keeps the link (a
+  readline redraw), and so does `draw` writing into the row it just
+  wrapped to.
+- When rows move relative to each other, the moved rows lose their link:
+  IL/DL, and IND/RI scrolling inside a DECSTBM region. That covers the moved
+  rows and the row below the region. A full-screen scroll keeps the link,
+  because the top row goes to the scrollback.
 - It moves with the row: scrolling, the scrollback (`_Row`, a `dict` with a
   `continued` slot), shrinking into history and pulling back on grow.
 
@@ -46,8 +54,7 @@ the last row, and wraps again at the new width:
 - a wide character never straddles two rows. If it does not fit, the row ends
   one cell short and the character starts the next row;
 - combining characters are already merged into their base cell by pyte;
-- a short row that is not wrapped is reused as is, so the cost is
-  proportional to the wrapped text, not to the scrollback size;
+- a short row that is not wrapped is reused as is;
 - the scrollback keeps its `maxlen`. A narrower width drops the oldest rows
   first, as new output would.
 
@@ -92,11 +99,10 @@ where VTE, the default backend on that platform, already does the same thing.
   Only output that ConPTY passed through as a soft wrap is.
 - DECSC saved cursors (`ESC 7`) are not remapped. Neither is the main screen
   saved behind the alternate screen.
-- IL/DL (insert/delete line) move rows together with their flags. A blank row
-  inserted inside a wrapped line can join it to the row above.
-- Cost: about 0.1 s per width change with a full 10 000-row scrollback in
-  which a fifth of the lines are 200 characters long. Typical scrollbacks are
-  far below that.
+- Performance has not been measured in the GTK view. Each width change walks
+  every row of the scrollback in Python.
+- pyte's `insert_characters` keeps one pushed-off cell just past the last
+  column. The model drops it, so reflow cannot bring it back.
 
 ## libvterm model
 

@@ -167,3 +167,56 @@ def test_reflow_can_be_turned_off():
     model.feed(LONG.encode())
     model.resize(80, 5)
     assert _rows(model) == [LONG[:40], LONG[40:]]
+
+
+# Erasing or shifting cells breaks the link at the edited edge; it must not
+# re-join erased text, or text written later, with unrelated rows.
+_EDITS = {
+    # ED 1 with the cursor on the continuation row: both rows lose the link.
+    "ED1": (LONG.encode() + b"\x1b[2;5H\x1b[1J", ["", "     " + LONG[45:]]),
+    "ED0": (b"top\r\n" + LONG.encode() + b"\x1b[2;5H\x1b[0Jnew", ["top", LONG[:4] + "new"]),
+    "EL0-at-column-0": (LONG.encode() + b"\x1b[2;1H\x1b[0Knew", [LONG[:40], "new"]),
+    "EL1": (LONG.encode() + b"\x1b[2;3H\x1b[1K", [LONG[:40], "   " + LONG[43:]]),
+    "EL2": (LONG.encode() + b"\x1b[1;1H\x1b[2Knew", ["new", LONG[40:]]),
+    "ECH-at-start": (LONG.encode() + b"\x1b[2;1H\x1b[3X", [LONG[:40], "   " + LONG[43:]]),
+    "ECH-at-end": (LONG.encode() + b"\x1b[1;39H\x1b[2X", [LONG[:38], LONG[40:]]),
+    "DCH": (LONG.encode() + b"\x1b[1;5H\x1b[3P", [LONG[:4] + LONG[7:40], LONG[40:]]),
+    "ICH": (LONG.encode() + b"\x1b[1;5H\x1b[3@", [LONG[:4] + "   " + LONG[4:37], LONG[40:]]),
+    "IL": (LONG.encode() + b"\x1b[2;1H\x1b[Lnew", [LONG[:40], "new", LONG[40:]]),
+    "DL": (b"top\r\n" + LONG.encode() + b"\x1b[2;1H\x1b[M", ["top", LONG[40:]]),
+    # Scrolling inside a region discards the row above the continuation.
+    "IND-in-region": (b"head\r\n\x1b[2;3r\x1b[2;1H" + LONG.encode() + b"\n", ["head", LONG[40:]]),
+    "RI-in-region": (
+        LONG.encode() + b"\x1b[2;4r\x1b[2;1H\x1bMnew",
+        [LONG[:40], "new", LONG[40:]],
+    ),
+}
+
+
+@pytest.mark.parametrize("data, expected", _EDITS.values(), ids=_EDITS.keys())
+def test_edits_break_the_wrap_link_at_the_edited_edge(data, expected):
+    model = TerminalModel(40, 6)
+    model.feed(data)
+    model.resize(80, 6)
+    assert _rows(model) == expected
+
+
+def test_overwriting_a_wrapped_row_in_place_keeps_the_link():
+    # Readline-style redraw: cursor back to the row start, text rewritten.
+    model = TerminalModel(40, 5)
+    model.feed(LONG.encode() + b"\x1b[2;1H" + LONG[40:45].upper().encode())
+    model.resize(80, 5)
+    assert _rows(model) == [LONG[:40] + LONG[40:45].upper() + LONG[45:]]
+
+
+def test_cursor_on_a_wide_character_continuation():
+    text = "中文" * 15  # 60 cells: 40 on the first row, 20 on the second
+    model = TerminalModel(40, 5)
+    model.feed(text.encode() + b"\x1b[2;6H")  # the stub of the third wide char
+    assert (model.screen.cursor.y, model.screen.cursor.x) == (1, 5)
+    model.resize(80, 5)
+    assert (model.screen.cursor.y, model.screen.cursor.x) == (0, 44)  # its lead
+    model.resize(15, 5)  # 7 wide chars per row: the 23rd starts row 3
+    assert (model.screen.cursor.y, model.screen.cursor.x) == (3, 2)
+    model.feed(b"X")
+    assert model.line(model.history_length + 3)[2].data == "X"
