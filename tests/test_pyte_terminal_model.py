@@ -83,9 +83,7 @@ def test_resize_inside_alternate_screen_restores_main_screen(make_model):
     ],
     ids=["shrink", "grow", "shrink-grow", "both-axes"],
 )
-def test_prompt_survives_resizes_inside_alternate_screen(make_model, request, sizes, history):
-    if "pyte" in request.node.callspec.id:
-        request.applymarker(pytest.mark.xfail(reason="known pyte alt-screen resize bug", strict=False))
+def test_prompt_survives_resizes_inside_alternate_screen(make_model, sizes, history):
     model = make_model(20, 5)
     _fill(model, 12)
     model.feed(b"$ less")
@@ -102,10 +100,8 @@ def test_prompt_survives_resizes_inside_alternate_screen(make_model, request, si
 
 
 @pytest.mark.parametrize("sizes", [((20, 3),), ((20, 8), (20, 3)), ((20, 3), (20, 9))])
-def test_next_prompt_follows_command_after_alternate_screen_resize(make_model, request, sizes):
+def test_next_prompt_follows_command_after_alternate_screen_resize(make_model, sizes):
     # As vim/htop leave it: the command line, then the cursor on a blank row.
-    if "pyte" in request.node.callspec.id:
-        request.applymarker(pytest.mark.xfail(reason="known pyte alt-screen resize bug", strict=False))
     model = make_model(20, 5)
     _fill(model, 12)
     model.feed(b"$ vim\r\n")

@@ -175,7 +175,8 @@ class EmulatorScreen(pyte.Screen):
         #: the model owns it (not ConPTY) and never on the alternate screen.
         self.reflow = True
         self._drawing = False
-        #: The width changed on the alternate screen; the main screen saved
+        self._draw_end = None
+        #: The size changed on the alternate screen; the main screen saved
         #: behind it is reflowed when it comes back.
         self._reflow_main_on_leave = False
         super().__init__(columns, lines)
@@ -203,16 +204,18 @@ class EmulatorScreen(pyte.Screen):
     # -- pyte event overrides ------------------------------------------------
 
     def draw(self, data: str) -> None:
-        if self.cursor.x == 0 and not self.pull_history_on_grow:
-            # ConPTY positions to a row start only to repaint it, with
-            # whatever its own buffer holds there: not a wrap from above.
-            self._unlink(self.cursor.y)
+        if not self.pull_history_on_grow and (self.cursor.y, self.cursor.x) != self._draw_end:
+            # Text that does not continue where the last text ended is a
+            # ConPTY repaint of the row with whatever its own buffer holds:
+            # it neither continues the row above nor is continued below.
+            self._unlink(self.cursor.y, self.cursor.y + 1)
         # pyte's draw calls linefeed() only to autowrap.
         self._drawing = True
         try:
             super().draw(data)
         finally:
             self._drawing = False
+        self._draw_end = (self.cursor.y, self.cursor.x)
 
     def linefeed(self) -> None:
         super().linefeed()
@@ -292,6 +295,7 @@ class EmulatorScreen(pyte.Screen):
         self._main_buffer = None
         self._main_cursor = None
         self._reflow_main_on_leave = False
+        self._draw_end = None
         super().reset()
 
     def index(self) -> None:
@@ -365,12 +369,14 @@ class EmulatorScreen(pyte.Screen):
             return
 
         reflow = self.reflow and columns != self.columns
-        if reflow and self.pull_history_on_grow:
-            if not self.alternate_active:
+        if self.reflow and self.pull_history_on_grow:
+            if self.alternate_active:
+                # The saved main screen keeps its rows until it comes back.
+                self._reflow_main_on_leave = True
+            elif reflow:
                 self._reflow_screen(lines, columns)
                 self._finish_resize(lines, columns)
                 return
-            self._reflow_main_on_leave = True
 
         if lines < self.lines:
             # Keep the cursor row on screen: scroll the top rows away (into

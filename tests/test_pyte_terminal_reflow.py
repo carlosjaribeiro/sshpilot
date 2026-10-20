@@ -283,3 +283,84 @@ def test_spaces_at_wrap_points_survive_round_trips():
     assert _rows(model) == narrow
     model.resize(80, 5)
     assert _rows(model) == [text.rstrip()]
+
+
+def _links(model):
+    return [bool(getattr(model.screen.buffer.get(y), "continued", False)) for y in range(model.lines)]
+
+
+# Rows 1 and 2 continue row 0; the cursor goes to row 1 (column 5 or 1).
+_ERASE_LINKS = {
+    "ED0": (b"\x1b[2;5H\x1b[0J", [False, True, False, False]),
+    "ED0-at-column-0": (b"\x1b[2;1H\x1b[0J", [False, False, False, False]),
+    "ED1": (b"\x1b[2;5H\x1b[1J", [False, False, True, False]),
+    "ED2": (b"\x1b[2;5H\x1b[2J", [False, False, False, False]),
+    "EL0": (b"\x1b[2;5H\x1b[0K", [False, True, False, False]),
+    "EL0-at-column-0": (b"\x1b[2;1H\x1b[0K", [False, False, False, False]),
+    "EL1": (b"\x1b[2;5H\x1b[1K", [False, False, True, False]),
+    "EL2": (b"\x1b[2;5H\x1b[2K", [False, False, False, False]),
+}
+
+
+@pytest.mark.parametrize("data, links", _ERASE_LINKS.values(), ids=_ERASE_LINKS.keys())
+def test_erases_leave_exactly_the_valid_links(data, links):
+    model = TerminalModel(40, 4)
+    model.feed((LONG + LONG[:30]).encode())
+    assert _links(model) == [False, True, True, False]
+    model.feed(data)
+    assert _links(model) == links
+
+
+def _conpty_model():
+    model = TerminalModel(40, 3)
+    model.pull_history_on_grow = False
+    return model
+
+
+def test_conpty_wraps_split_across_feeds_still_rejoin():
+    data = b"x\r\n" + LONG.encode() + b"\r\n$ \r\n\r\n\r\n"  # LONG ends up in the scrollback
+    for cut in range(len(data) + 1):
+        model = _conpty_model()
+        model.feed(data[:cut])
+        model.feed(data[cut:])
+        model.resize(80, 3)
+        assert _rows(model)[:2] == ["x", LONG], cut
+
+
+def test_a_conpty_repaint_that_starts_mid_row_does_not_join_the_scrollback():
+    model = _conpty_model()
+    model.feed(b"head\r\n" + LONG.encode() + b"\r\n\r\n")  # LONG[40:] on row 0
+    model.feed(b"\x1b[H\x1b[2Cindented\r\n\r\n\r\n")
+    model.resize(80, 3)
+    assert _rows(model)[:3] == ["head", LONG[:40], LONG[40:42] + "indented" + LONG[50:]]
+
+
+def test_a_conpty_overwrite_without_erase_unlinks_the_row_below():
+    model = _conpty_model()
+    model.feed(LONG.encode() + b"\r\n" + LONG.encode())
+    model.feed(b"\x1b[H\r\nnew_row2" + b"\r\n" * 4)  # all rows into the scrollback
+    model.resize(80, 3)
+    # Row 0 was not repainted, so it still continues the scrollback.
+    assert _rows(model)[:3] == [LONG, "new_row2" + LONG[8:40], LONG[40:]]
+
+
+@pytest.mark.parametrize("sizes", [((40, 2),), ((20, 2), (40, 5)), ((20, 5), (40, 5))])
+def test_main_screen_rows_survive_alternate_screen_resizes(sizes):
+    model = TerminalModel(40, 5)
+    model.feed(b"1\r\n2\r\n3\r\n" + LONG.encode())
+    model.feed(b"\x1b[?1049h\x1b[Heditor")
+    for columns, lines in sizes:
+        model.resize(columns, lines)
+    model.feed(b"\x1b[?1049lX")
+    assert _rows(model) == ["1", "2", "3", LONG[:40], LONG[40:] + "X"]
+
+
+def test_scroll_region_line_edits_with_a_top_margin():
+    model = TerminalModel(40, 5)
+    model.feed(b"head\r\n" + LONG.encode() + b"\x1b[2;4r\x1b[3;1H\x1b[Lnew")
+    model.resize(80, 5)
+    assert _rows(model) == ["head", LONG[:40], "new", LONG[40:]]
+    model = TerminalModel(40, 5)
+    model.feed(b"head\r\nmid\r\n" + LONG.encode() + b"\x1b[2;4r\x1b[2;1H\x1b[M")
+    model.resize(80, 5)
+    assert _rows(model) == ["head", LONG]

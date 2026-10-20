@@ -38,7 +38,7 @@ default on).
 | Scrollback | reflowed | reflowed |
 | Primary screen | reflowed together with the scrollback | **not** reflowed (old behaviour) |
 | Alternate screen (vim, less, htop) | never | never |
-| Main screen saved behind the alternate screen | reflowed when the alternate screen exits | cut at the new width (old behaviour); the next row is unlinked |
+| Main screen saved behind the alternate screen | rebuilt when the alternate screen exits (width or height change) | cut at the new width (old behaviour); the next row is unlinked |
 
 "Raw stream" versus "ConPTY" is the existing `pull_history_on_grow` switch
 (`prepare_pty_less_emulation`, `spawn_async`). It already means "the model
@@ -50,10 +50,21 @@ pushed rows therefore end up at the new width too. Screen rows that narrowing
 cuts lose their tail, as before. The row after a cut row no longer continues
 it.
 
-On the ConPTY path, `draw` starting at column 0 also unlinks the row. ConPTY
-moves to the start of a row only to repaint it, with whatever its own buffer
-holds there, so the row no longer follows the one above. On raw streams,
-overwriting in place keeps the link (readline redraws).
+On the ConPTY path, text that does not start exactly where the previous text
+ended is treated as a repaint. The row it lands on loses both links, to the
+row above and to the row below. ConPTY moves the cursor and draws (CUP, CUF,
+CR plus text) only to repaint a row with whatever its own buffer holds there.
+A wrap that ConPTY passes through is continuous text, so its link survives,
+even when the output is split across feeds or broken by SGR. Cursor moves
+that draw nothing leave the rows unchanged, so their links stay valid. On raw
+streams, overwriting in place keeps the link (readline redraws).
+
+Leaving the alternate screen on a raw stream rebuilds the main screen
+whenever the size changed meanwhile. That reflows it and bottom-anchors it,
+so rows that no longer fit go to the scrollback. Before this change, a
+height shrink on the alternate screen dropped the main screen rows below the
+new height (`tests/test_pyte_terminal_model.py` had marked those cases as
+expected failures for pyte).
 
 Reflow joins each logical line (a row plus the rows that continue it), drops
 trailing unwritten cells of soft-wrapped rows and trailing default blanks of
@@ -106,16 +117,21 @@ where VTE, the default backend on that platform, already does the same thing.
 
 - **Not verified in a real Windows window.** Unit tests only. Under ConPTY,
   repainted rows arrive as cursor moves rather than autowraps. They carry no
-  `continued` flag (a repaint at column 0 clears it), so they are not joined
+  `continued` flag (a repaint clears it), so they are not joined
   after they scroll into history. Only output that ConPTY passed through as a
   soft wrap is.
 - DECSC saved cursors (`ESC 7`) are not remapped.
 - Under ConPTY, narrowing still cuts the screen rows and the main screen
   saved behind the alternate screen, which loses the cut text. ConPTY
   repaints its own buffer over them; nothing is spliced.
-- On a raw stream, the main screen saved behind the alternate screen is
-  reflowed only when the alternate screen is left. Until then, rows kept
-  past the new width stay hidden.
+- Under ConPTY, a wrapped line is not rejoined in two cases. The first is
+  when ConPTY writes part of a continuation row by moving the cursor, for
+  example a CUF over a run of spaces. The second is any width or height
+  change in between, because the end position of the last text is then
+  stale. Either way the line just stays split.
+- With ConPTY or with reflow off, a height shrink on the alternate screen
+  still drops the saved main screen rows below the new height, as upstream
+  does (`windows-port.md` §3a).
 - Performance has not been measured in the GTK view. Each width change walks
   every row of the scrollback in Python.
 - pyte's `insert_characters` keeps one pushed-off cell just past the last

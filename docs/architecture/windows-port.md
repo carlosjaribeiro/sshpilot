@@ -457,8 +457,10 @@ Plain text is slower than SGR-heavy text on libvterm because the Python
 itself happens in C.
 
 `tests/test_pyte_terminal_model.py` runs every model test against both
-models through a `make_model` fixture. The alternate-screen resize tests are
-`xfail` for pyte.
+models through a `make_model` fixture. The alternate-screen resize tests
+pass for pyte on raw streams, where the main screen is rebuilt when the
+alternate screen exits (terminal-reflow.md); under ConPTY pyte still drops
+those rows.
 
 **Full-screen apps.** vim 9, GNU less and htop were recorded under a Linux
 PTY in WSL with 80x24 → larger → smaller resizes inside the alternate screen,
