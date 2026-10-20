@@ -175,6 +175,9 @@ class EmulatorScreen(pyte.Screen):
         #: the model owns it (not ConPTY) and never on the alternate screen.
         self.reflow = True
         self._drawing = False
+        #: The width changed on the alternate screen; the main screen saved
+        #: behind it is reflowed when it comes back.
+        self._reflow_main_on_leave = False
         super().__init__(columns, lines)
 
     # -- small helpers -------------------------------------------------------
@@ -200,6 +203,10 @@ class EmulatorScreen(pyte.Screen):
     # -- pyte event overrides ------------------------------------------------
 
     def draw(self, data: str) -> None:
+        if self.cursor.x == 0 and not self.pull_history_on_grow:
+            # ConPTY positions to a row start only to repaint it, with
+            # whatever its own buffer holds there: not a wrap from above.
+            self._unlink(self.cursor.y)
         # pyte's draw calls linefeed() only to autowrap.
         self._drawing = True
         try:
@@ -284,6 +291,7 @@ class EmulatorScreen(pyte.Screen):
     def reset(self) -> None:
         self._main_buffer = None
         self._main_cursor = None
+        self._reflow_main_on_leave = False
         super().reset()
 
     def index(self) -> None:
@@ -343,8 +351,11 @@ class EmulatorScreen(pyte.Screen):
         if self._main_cursor is not None:
             self.cursor = self._main_cursor
             self._main_cursor = None
-            self.ensure_hbounds()
-            self.ensure_vbounds()
+        if self._reflow_main_on_leave:
+            self._reflow_main_on_leave = False
+            self._reflow_screen(self.lines, self.columns)
+        self.ensure_hbounds()
+        self.ensure_vbounds()
         self.dirty.update(range(self.lines))
 
     def resize(self, lines: Optional[int] = None, columns: Optional[int] = None) -> None:
@@ -353,17 +364,13 @@ class EmulatorScreen(pyte.Screen):
         if lines == self.lines and columns == self.columns:
             return
 
-        if self.reflow and columns != self.columns:
-            if self.pull_history_on_grow and not self.alternate_active:
+        reflow = self.reflow and columns != self.columns
+        if reflow and self.pull_history_on_grow:
+            if not self.alternate_active:
                 self._reflow_screen(lines, columns)
                 self._finish_resize(lines, columns)
                 return
-            # ConPTY repaints its own unreflowed screen and the shell
-            # addresses it absolutely; only the scrollback is ours to rewrap.
-            history, _ = reflow_rows(
-                list(self.scrollback), columns, self.default_char, lambda continued: _Row(continued=continued)
-            )
-            self._set_scrollback(history)
+            self._reflow_main_on_leave = True
 
         if lines < self.lines:
             # Keep the cursor row on screen: scroll the top rows away (into
@@ -395,10 +402,25 @@ class EmulatorScreen(pyte.Screen):
             self.cursor.y += pulled
 
         if columns < self.columns:
-            for buffer in (self.buffer, self._main_buffer or {}):
-                for line in buffer.values():
-                    for x in [x for x in line if x >= columns]:
+            buffers = [self.buffer]
+            if self._main_buffer is not None and not self._reflow_main_on_leave:
+                buffers.append(self._main_buffer)
+            for buffer in buffers:
+                for y, line in list(buffer.items()):
+                    cut = [x for x in line if x >= columns]
+                    for x in cut:
                         line.pop(x, None)
+                    if cut:  # the row lost its end: the next one no longer continues it
+                        _set_continued(buffer.get(y + 1), False)
+
+        if reflow:
+            # ConPTY repaints its own unreflowed screen and the shell
+            # addresses it absolutely; only the scrollback is ours to rewrap.
+            # After the shrink above, so the rows it pushed are rewrapped too.
+            history, _ = reflow_rows(
+                list(self.scrollback), columns, self.default_char, lambda continued: _Row(continued=continued)
+            )
+            self._set_scrollback(history)
 
         self._finish_resize(lines, columns)
 
@@ -418,7 +440,9 @@ class EmulatorScreen(pyte.Screen):
         """Rewrap scrollback and screen together, keeping the cursor's text."""
 
         default = self.default_char
-        rows = list(self.scrollback) + [self.buffer[y] for y in range(self.lines)]
+        # A main screen saved behind the alternate one can be taller.
+        height = max(self.lines, self.cursor.y + 1, max(self.buffer, default=-1) + 1)
+        rows = list(self.scrollback) + [self.buffer[y] for y in range(height)]
         cursor_row = len(self.scrollback) + self.cursor.y
         # Blank rows below the cursor are dropped, not wrapped into history.
         last = max(

@@ -220,3 +220,66 @@ def test_cursor_on_a_wide_character_continuation():
     assert (model.screen.cursor.y, model.screen.cursor.x) == (3, 2)
     model.feed(b"X")
     assert model.line(model.history_length + 3)[2].data == "X"
+
+
+def test_rows_pushed_by_a_diagonal_shrink_under_conpty_are_rewrapped():
+    model = TerminalModel(80, 6)
+    model.pull_history_on_grow = False
+    for number in range(6):
+        model.feed(b"%d" % number + b"-" * 70 + b"\r\n")
+    model.feed(b"$ ")
+    model.resize(40, 3)  # narrower and shorter at once
+    assert all(max(model.line(row)) < 40 for row in range(model.history_length))
+    model.resize(80, 3)
+    history = [model.row_text(row).rstrip() for row in range(model.history_length)]
+    assert history == [f"{number}" + "-" * 70 for number in range(len(history))]
+
+
+def test_a_conpty_repaint_does_not_join_its_first_row_to_the_scrollback():
+    from tests.test_pyte_terminal_model import _conhost_repaint
+
+    model = TerminalModel(40, 3)
+    model.pull_history_on_grow = False
+    model.feed(b"head\r\n" + LONG.encode() + b"\r\n\r\n")  # LONG[40:] now on row 0
+    _conhost_repaint(model, [b"other", b"x", b"$ "])
+    model.feed(b"\r\n" * 3)
+    model.resize(80, 3)
+    assert _rows(model)[:4] == ["head", LONG[:40], "other", "x"]
+
+
+def test_main_screen_behind_the_alternate_screen_is_reflowed_on_return():
+    model = TerminalModel(40, 5)
+    model.feed(LONG.encode() + b"\r\n$ vim")
+    model.feed(b"\x1b[?1049h\x1b[Heditor")
+    model.resize(20, 5)
+    model.resize(40, 5)
+    model.feed(b"\x1b[?1049l")
+    assert _rows(model) == [LONG[:40], LONG[40:], "$ vim"]
+    model.feed(b"X")
+    model.resize(80, 5)
+    assert _rows(model) == [LONG, "$ vimX"]
+
+
+def test_main_screen_cut_on_the_alternate_screen_under_conpty_is_never_spliced():
+    model = TerminalModel(40, 5)
+    model.pull_history_on_grow = False
+    model.feed(LONG.encode() + b"\r\n$ vim")
+    model.feed(b"\x1b[?1049h\x1b[Heditor")
+    model.resize(20, 5)  # cuts LONG[20:40] off the saved row
+    model.resize(40, 5)
+    model.feed(b"\x1b[?1049l" + b"\r\n" * 5)  # into the scrollback, which is reflowed
+    model.resize(80, 5)
+    assert LONG[:20] + LONG[40:] not in "\n".join(_rows(model))
+    assert _rows(model) == [LONG[:20], LONG[40:], "$ vim"]
+
+
+def test_spaces_at_wrap_points_survive_round_trips():
+    text = "a" * 39 + " b" + "c d " * 10
+    model = TerminalModel(40, 5)
+    model.feed(text.encode())
+    narrow = _rows(model)
+    for columns in (80, 13, 17, 7, 40):
+        model.resize(columns, 5)
+    assert _rows(model) == narrow
+    model.resize(80, 5)
+    assert _rows(model) == [text.rstrip()]

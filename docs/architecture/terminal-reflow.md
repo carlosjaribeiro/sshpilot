@@ -38,11 +38,22 @@ default on).
 | Scrollback | reflowed | reflowed |
 | Primary screen | reflowed together with the scrollback | **not** reflowed (old behaviour) |
 | Alternate screen (vim, less, htop) | never | never |
-| Main screen saved behind the alternate screen | not reflowed (old behaviour) | not reflowed |
+| Main screen saved behind the alternate screen | reflowed when the alternate screen exits | cut at the new width (old behaviour); the next row is unlinked |
 
 "Raw stream" versus "ConPTY" is the existing `pull_history_on_grow` switch
 (`prepare_pty_less_emulation`, `spawn_async`). It already means "the model
 owns the screen rows" versus "conhost repaints its viewport after a resize".
+
+On the ConPTY path a resize that changes both size and width first pushes
+the rows it scrolls off into the scrollback, then rewraps the scrollback. The
+pushed rows therefore end up at the new width too. Screen rows that narrowing
+cuts lose their tail, as before. The row after a cut row no longer continues
+it.
+
+On the ConPTY path, `draw` starting at column 0 also unlinks the row. ConPTY
+moves to the start of a row only to repaint it, with whatever its own buffer
+holds there, so the row no longer follows the one above. On raw streams,
+overwriting in place keeps the link (readline redraws).
 
 Reflow joins each logical line (a row plus the rows that continue it), drops
 trailing unwritten cells of soft-wrapped rows and trailing default blanks of
@@ -94,11 +105,17 @@ where VTE, the default backend on that platform, already does the same thing.
 ## Known limits
 
 - **Not verified in a real Windows window.** Unit tests only. Under ConPTY,
-  repainted rows arrive as cursor moves rather than autowraps. Such rows carry
-  no `continued` flag, so they are not joined after they scroll into history.
-  Only output that ConPTY passed through as a soft wrap is.
-- DECSC saved cursors (`ESC 7`) are not remapped. Neither is the main screen
-  saved behind the alternate screen.
+  repainted rows arrive as cursor moves rather than autowraps. They carry no
+  `continued` flag (a repaint at column 0 clears it), so they are not joined
+  after they scroll into history. Only output that ConPTY passed through as a
+  soft wrap is.
+- DECSC saved cursors (`ESC 7`) are not remapped.
+- Under ConPTY, narrowing still cuts the screen rows and the main screen
+  saved behind the alternate screen, which loses the cut text. ConPTY
+  repaints its own buffer over them; nothing is spliced.
+- On a raw stream, the main screen saved behind the alternate screen is
+  reflowed only when the alternate screen is left. Until then, rows kept
+  past the new width stay hidden.
 - Performance has not been measured in the GTK view. Each width change walks
   every row of the scrollback in Python.
 - pyte's `insert_characters` keeps one pushed-off cell just past the last
