@@ -740,22 +740,8 @@ Done (details in windows-implementation-plan.md and the sections above):
 - **Signing and winget.** The package job signs through SignPath once the
   maintainer has an account and sets the secrets; until then installers are
   unsigned and SmartScreen warns. winget submission follows a signed release.
-- **Reflow on resize (plan step 2.6), deliberately not done.** Measured: the
-  bundled ConPTY does not reflow either (a 90-character line stays wrapped at
-  40 columns after widening to 100), and shells under it redraw with
-  absolute cursor positions computed against ConPTY's own, unreflowed buffer,
-  so emulator-side reflow would desynchronise the screen. libvterm's reflow
-  also rewraps on-screen rows only; scrollback would need a Python-side
-  rewrap keyed on `sb_pushline4`'s continuation flag (available in the
-  patched build). On Linux/macOS the built-in backend is opt-in and VTE
-  reflows. The pyte model now rewraps the scrollback, and the visible
-  screen on raw streams and under the bundled conpty.dll 1.25, which was
-  measured to relay a VT client's bytes and send nothing on a resize
-  (terminal-reflow.md). Re-measured, the finding above was the model's
-  view: conpty.dll sends nothing on a resize, so the line stayed wrapped
-  only because the model did not rewrap it. Only the inbox console
-  repaints, and it positions later output against its own (reflowed)
-  viewport.
+- **Reflow on resize.** See [terminal-reflow.md](terminal-reflow.md) for the
+  current behavior, measurements and limits.
 - **Retiring MSYS2 and pywinpty (plan phase 8).** Waits for the first shipped
   Windows release: then remove the MSYS2 section, the
   `SSHPILOT_CONPTY_BACKEND=pywinpty` switch and the pywinpty dependency.

@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-FEATURES=(feat/securecrt-style-profile feat/highlight-profile-editor feat/securecrt-r4 feat/session-logging feat/securecrt-session-import feat/terminal-reflow)
+FEATURES=(feat/securecrt-style-profile feat/highlight-profile-editor feat/securecrt-r4 feat/session-logging feat/securecrt-session-import feat/terminal-reflow feat/reflow-visible-windows)
 PY="${PYTHON:-python3}"
 
 [ "$(git rev-parse --abbrev-ref HEAD)" = carlos-custom ] || { echo "Check out carlos-custom first." >&2; exit 1; }

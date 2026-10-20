@@ -4,7 +4,7 @@
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path -Parent $PSScriptRoot)
 
-$features = "feat/securecrt-style-profile", "feat/highlight-profile-editor", "feat/securecrt-r4", "feat/session-logging", "feat/securecrt-session-import", "feat/terminal-reflow"
+$features = "feat/securecrt-style-profile", "feat/highlight-profile-editor", "feat/securecrt-r4", "feat/session-logging", "feat/securecrt-session-import", "feat/terminal-reflow", "feat/reflow-visible-windows"
 $py = if (Test-Path ".venv-win\Scripts\python.exe") { ".venv-win\Scripts\python.exe" } else { "python" }
 
 function Git { & git @args; if ($LASTEXITCODE -ne 0) { throw "git $args failed" } }

@@ -1,6 +1,6 @@
 # Personal build (`carlos-custom`)
 
-`carlos-custom` is upstream `main` plus six fork feature branches, merged (never rebased):
+`carlos-custom` is upstream `main` plus seven fork feature branches, merged (never rebased):
 
 | Branch | Adds |
 |---|---|
@@ -10,6 +10,7 @@
 | `feat/session-logging` | SecureCRT-style automatic session logging |
 | `feat/securecrt-session-import` | SecureCRT session converter |
 | `feat/terminal-reflow` | Correct pyte terminal resizing and ConPTY repaint behavior |
+| `feat/reflow-visible-windows` | Reflow the visible screen under the bundled ConPTY |
 
 ## Install
 
@@ -79,7 +80,7 @@ scripts/update-custom.sh          # Linux
 powershell -ExecutionPolicy Bypass -File scripts\update-custom.ps1   # Windows
 ```
 
-It fetches `upstream` and `origin`, merges `upstream/main` and then the six feature
+It fetches `upstream` and `origin`, merges `upstream/main` and then the seven feature
 branches into `carlos-custom` (merge, not rebase), runs ruff and the highlight / logging /
 import / terminal-reflow tests (including the custom profile editor and SecureCRT word tests), and prints what changed. On a merge conflict it stops and tells you how to
 finish or abort. It never pushes: publish with `git push origin carlos-custom` (never force).
