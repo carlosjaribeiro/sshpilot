@@ -4160,6 +4160,9 @@ class MainWindow(Adw.ApplicationWindow, WindowBroadcastMixin, WindowSessionMixin
         """
         self._cancel_pending_connection_rows()
         self._connection_rows_split = False
+        # Whoever rebuilds (typing, Esc, closing search), the list now shows
+        # this query; on_search_changed skips a rebuild only for the same one.
+        self._last_search_query = self._sidebar_search_query()
         steps = self._rebuild_connection_list_steps()
         if first_rows is None:
             for _visible in steps:
@@ -4379,9 +4382,7 @@ class MainWindow(Adw.ApplicationWindow, WindowBroadcastMixin, WindowSessionMixin
                 if getattr(conn, 'id', None)
             }
         )
-        search_text = ''
-        if hasattr(self, 'search_entry') and self.search_entry:
-            search_text = self.search_entry.get_text().strip().lower()
+        search_text = self._sidebar_search_query()
 
         tag_filter = getattr(self, '_tag_filter', None)
 
@@ -4679,15 +4680,18 @@ class MainWindow(Adw.ApplicationWindow, WindowBroadcastMixin, WindowSessionMixin
             row.update_status()
             row.queue_draw()
 
+    def _sidebar_search_query(self) -> str:
+        """The search text the sidebar list filters by."""
+        entry = getattr(self, 'search_entry', None)
+        return entry.get_text().strip().lower() if entry else ''
+
     def on_search_changed(self, entry):
         """Handle search text changes and update connection list."""
         # GtkSearchEntry already debounces this signal (search-delay, 150 ms).
         # The rebuild recreates every row, so skip it when the query the list
         # filters by is unchanged (only case or surrounding spaces differ).
-        query = entry.get_text().strip().lower()
-        if query == getattr(self, '_last_search_query', None):
+        if entry.get_text().strip().lower() == getattr(self, '_last_search_query', None):
             return
-        self._last_search_query = query
         self.rebuild_connection_list()
         first_row = self.connection_list.get_row_at_index(0)
         if first_row:
