@@ -709,6 +709,12 @@ def write_identity_state_v2(path: Path, state: "IdentityStateV2") -> None:
     _atomic_write_bytes(Path(path), content, prefix=".connections-")
 
 
+def identity_state_v2_on_disk(path: Path, state: "IdentityStateV2") -> bool:
+    """Whether *path* holds exactly what ``write_identity_state_v2`` writes for *state*."""
+    raw = _read_state_bytes(Path(path))
+    return raw is not None and raw == _serialize_json(state.to_dict(), "Identity-state")
+
+
 def migrate_connection_state_v1_to_v2(
     path: Path,
     projections: Sequence["ConnectionIdentityProjection"],

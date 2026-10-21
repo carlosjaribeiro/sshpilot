@@ -104,6 +104,7 @@ from .state_file import (
     read_connection_state,
     read_legacy_connection_state,
     write_identity_state_v2,
+    identity_state_v2_on_disk,
     identity_transaction_intent_path,
     write_pending_identity_transaction,
     clear_pending_identity_transaction,
@@ -503,7 +504,9 @@ class ConnectionRepository:
     def discover_paths(self) -> frozenset:
         with self._lock:
             paths = {self._state_path}
-            loaded = self._ssh_store.load()
+            # The installed config is what the last load or commit parsed;
+            # reparsing every host only to list its files doubled each reload.
+            loaded = self._loaded_ssh_config or self._ssh_store.load()
             paths.update(Path(p) for p in (loaded.watch_paths or loaded.source_paths))
             return frozenset(paths)
 
@@ -521,9 +524,41 @@ class ConnectionRepository:
         """Re-read authoritative sources; publish a change only when semantics differ."""
         with self._mutation_scope():
             before = self._build_snapshot_locked()
+            if self._sources_match_installed_state_locked():
+                # The watcher reports the daemon's own writes too; re-reading
+                # what is already installed would reparse every host for nothing.
+                return before
             self._load_state_locked()
             after = self._build_snapshot_locked()
             return self._notify(before, after)
+
+    def _sources_match_installed_state_locked(self) -> bool:
+        """Whether a reload would read exactly the state already installed.
+
+        Content comparisons, not timestamps: the SSH config's revision is a
+        digest of every included file, and the sidecar must hold the exact
+        bytes the in-memory identity state serializes to. Anything else
+        (pending intent, degraded state, unreadable files) reloads as before.
+        """
+        loaded = self._loaded_ssh_config
+        state = self._identity_state
+        if (
+            loaded is None
+            or state is None
+            or self._identity_state_unavailable
+            or self._identity_recovery_required
+            or state.observed_ssh_revision != loaded.root_revision
+        ):
+            return False
+        try:
+            intent = identity_transaction_intent_path(self._state_path)
+            if intent.exists() or intent.is_symlink():
+                return False
+            if self._ssh_store._current_revision() != loaded.root_revision:
+                return False
+            return identity_state_v2_on_disk(self._state_path, state)
+        except (CoreError, OSError):
+            return False
 
     def transition_ssh_config(
         self,
