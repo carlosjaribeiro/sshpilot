@@ -112,6 +112,22 @@ def forwarding_rule_from_dict(d: dict) -> ForwardingRule:
     )
 
 
+def forwarding_rules_from_data(raw: Any) -> Tuple[ForwardingRule, ...]:
+    """The valid rules of a record's ``forwarding_rules`` value; others are skipped."""
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    rules = []
+    for item in raw:
+        if isinstance(item, ForwardingRule):
+            rules.append(item)
+        elif isinstance(item, dict):
+            try:
+                rules.append(forwarding_rule_from_dict(item))
+            except (TypeError, ValueError):
+                continue
+    return tuple(rules)
+
+
 # -- Patch validation -------------------------------------------------------
 
 EDITABLE_CONFIG_FIELDS = frozenset({
@@ -267,11 +283,18 @@ class ConnectionSummary:
     #: (``web · podman``, ``/dev/ttyUSB0 @ 115200``); empty for SSH and for
     #: a protocol the daemon cannot describe.
     target_summary: str = ""
+    #: The connection's port-forwarding rules, so a list view can show its
+    #: forwarding indicator without fetching each connection's editor details.
+    forwards: Tuple[ForwardingRule, ...] = ()
 
     def __post_init__(self) -> None:
         require_identifier(self.id, "connection id")
         if not self.nickname.strip():
             raise ValueError("connection nickname must not be empty")
+        if type(self.forwards) is not tuple or any(
+            type(rule) is not ForwardingRule for rule in self.forwards
+        ):
+            raise TypeError("connection forwards must be a tuple of ForwardingRule")
         if type(self.display_name) is not str:
             raise TypeError("connection display name must be a string")
         display_name = self.display_name.strip() or self.nickname

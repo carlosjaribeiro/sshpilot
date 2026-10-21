@@ -291,9 +291,6 @@ _format_connection_host_display = format_connection_host_display
 # fight.
 _ROW_ACTIONS_MIN_WIDTH = 230
 
-# Connections whose forwarding rules one sidebar bridge request fetches.
-_SIDEBAR_FORWARDING_FETCH_CHUNK = 16
-
 # A split sidebar rebuild (startup) builds the rows that fit the sidebar's
 # height first; this is the smallest row height it assumes (a compact row).
 _MIN_CONNECTION_ROW_HEIGHT = 28
@@ -2647,7 +2644,6 @@ class MainWindow(Adw.ApplicationWindow, WindowBroadcastMixin, WindowSessionMixin
         except Exception:
             connections = []
         self._attach_sidebar_forwarding_rules(connections)
-        self._refresh_sidebar_forwarding_rules(connections)
 
         compact = False
         try:
@@ -2767,12 +2763,6 @@ class MainWindow(Adw.ApplicationWindow, WindowBroadcastMixin, WindowSessionMixin
 
             row = row.get_next_sibling()
 
-    def _sidebar_forwarding_rules_enabled(self) -> bool:
-        try:
-            return bool(self.config.get_setting('ui.sidebar_show_port_forwarding', True))
-        except Exception:
-            return True
-
     def _sidebar_store_generation(self) -> int:
         try:
             return int(getattr(self.connection_manager, 'generation', 0) or 0)
@@ -2780,228 +2770,24 @@ class MainWindow(Adw.ApplicationWindow, WindowBroadcastMixin, WindowSessionMixin
             return 0
 
     @staticmethod
-    def _sidebar_connection_key(connection) -> Optional[str]:
-        value = getattr(connection, 'id', None) or getattr(connection, 'nickname', None)
-        return str(value or '').strip() or None
+    def _attach_sidebar_forwarding_rules(connections) -> None:
+        """Expose each summary's ``forwards`` as the rule dicts rows render.
 
-    @staticmethod
-    def _sidebar_connection_uses_ssh(connection) -> bool:
-        return str(getattr(connection, 'protocol', 'ssh') or 'ssh').lower() == 'ssh'
+        The store's summaries carry the rules, so the forwarding indicator
+        costs no daemon request per connection.
+        """
+        from .api.models.connections import forwarding_rule_to_dict
 
-    def _attach_sidebar_forwarding_rules(self, connections) -> None:
-        cache = getattr(self, '_forwarding_rules_cache', None)
-        if not cache:
-            return
-        generation = self._sidebar_store_generation()
         for connection in connections:
-            if not self._sidebar_connection_uses_ssh(connection):
-                continue
-            key = self._sidebar_connection_key(connection)
-            if key is None:
-                continue
-            entry = cache.get(key)
-            if entry is None or entry[0] != generation:
+            forwards = getattr(connection, 'forwards', None)
+            if forwards is None:
                 continue
             try:
-                object.__setattr__(connection, 'forwarding_rules', entry[1])
-            except Exception:
-                pass
-
-    def _refresh_sidebar_forwarding_rules(self, connections) -> None:
-        if not self._sidebar_forwarding_rules_enabled():
-            return
-        if getattr(self, '_is_quitting', False):
-            return
-        bridge = getattr(self, 'client_bridge', None)
-        client = getattr(self, 'client', None)
-        if bridge is None or client is None:
-            return
-        cache = getattr(self, '_forwarding_rules_cache', None)
-        if cache is None:
-            cache = {}
-            self._forwarding_rules_cache = cache
-        pending = getattr(self, '_forwarding_rules_pending', None)
-        if pending is None:
-            pending = set()
-            self._forwarding_rules_pending = pending
-        generation = self._sidebar_store_generation()
-        batch = []
-        for connection in connections:
-            if not self._sidebar_connection_uses_ssh(connection):
-                continue
-            key = self._sidebar_connection_key(connection)
-            if key is None:
-                continue
-            entry = cache.get(key)
-            if entry is not None and entry[0] == generation:
-                continue
-            if key in pending:
-                continue
-            pending.add(key)
-            batch.append((connection, key))
-        # One bridge request per chunk instead of one per connection: a single
-        # main-thread callback applies a whole chunk, and other daemon calls
-        # can still run between chunks on the bridge's one worker.
-        for start in range(0, len(batch), _SIDEBAR_FORWARDING_FETCH_CHUNK):
-            self._submit_sidebar_forwarding_fetch(
-                client,
-                bridge,
-                batch[start:start + _SIDEBAR_FORWARDING_FETCH_CHUNK],
-                generation,
-                cache,
-                pending,
-            )
-
-    def _schedule_sidebar_forwarding_refresh(self) -> None:
-        """Fetch missing forwarding rules once the sidebar has been painted.
-
-        A rebuild attaches the rules it already has at once; fetching the
-        rest waits for a low-priority idle callback, so the daemon calls and
-        their callbacks never compete with building or painting the rows.
-        Several rebuilds before it runs share one fetch.
-        """
-        if getattr(self, '_sidebar_forwarding_refresh_scheduled', False):
-            return
-        self._sidebar_forwarding_refresh_scheduled = True
-
-        def _run():
-            self._sidebar_forwarding_refresh_scheduled = False
-            try:
-                connections = self.connection_manager.get_connections()
-            except Exception:
-                return GLib.SOURCE_REMOVE
-            self._refresh_sidebar_forwarding_rules(connections)
-            return GLib.SOURCE_REMOVE
-
-        GLib.idle_add(_run, priority=GLib.PRIORITY_LOW)
-
-    def _submit_sidebar_forwarding_fetch(
-        self, client, bridge, batch, generation, cache, pending
-    ) -> None:
-        """Fetch the editor details of ``batch`` ((connection, key) pairs).
-
-        The request resolves to one ``(details, error)`` per entry, so one
-        connection's failure leaves the others' rules intact.
-        """
-
-        def fetch():
-            results = []
-            for connection, _key in batch:
-                try:
-                    results.append((
-                        client.get_connection_editor(connection_id_for(connection)),
-                        None,
-                    ))
-                except Exception as error:
-                    results.append((None, error))
-            return results
-
-        def refetch_if_stale() -> bool:
-            current_generation = self._sidebar_store_generation()
-            if current_generation == generation:
-                return False
-            logger.debug(
-                "Discarding stale forwarding rules for %d connection(s) "
-                "(generation %s -> %s)",
-                len(batch),
-                generation,
-                current_generation,
-            )
-            self._refresh_sidebar_forwarding_rules(
-                [connection for connection, _key in batch]
-            )
-            return True
-
-        def on_success(results):
-            for _connection, key in batch:
-                pending.discard(key)
-            if refetch_if_stale():
-                return
-            from .api.models.connections import (
-                ForwardingRule,
-                forwarding_rule_to_dict,
-            )
-            from .forwarding_only_ui import apply_forwarding_only_flag
-
-            updates = []
-            for (connection, key), (details, error) in zip(batch, results):
-                if error is not None:
-                    logger.debug(
-                        "Failed to fetch forwarding rules for %s: %s",
-                        key,
-                        type(error).__name__,
-                    )
-                    continue
-                try:
-                    raw = getattr(details, 'forwarding_rules', None) or ()
-                    rules = tuple(
-                        forwarding_rule_to_dict(rule)
-                        for rule in raw
-                        if isinstance(rule, (ForwardingRule, dict))
-                    )
-                    cache[key] = (generation, rules)
-                    apply_forwarding_only_flag(
-                        connection, getattr(details, 'extra_ssh_config', None) or ''
-                    )
-                    updates.append((connection, rules))
-                except Exception:
-                    logger.debug(
-                        "Failed to cache forwarding rules for %s", key, exc_info=True
-                    )
-            self._apply_sidebar_forwarding_rules(updates)
-
-        def on_error(_error):
-            for _connection, key in batch:
-                pending.discard(key)
-            refetch_if_stale()
-
-        try:
-            bridge.submit(fetch, on_success=on_success, on_error=on_error)
-        except Exception:
-            for _connection, key in batch:
-                pending.discard(key)
-            logger.debug(
-                "Failed to submit forwarding-rule fetch for %d connection(s)",
-                len(batch),
-                exc_info=True,
-            )
-
-    def _apply_sidebar_forwarding_rules(self, updates) -> None:
-        """Attach fetched rules ((connection, rules) pairs) and refresh rows.
-
-        Rows are found by connection key, since a rebuild may have replaced
-        the connection objects the fetch started with.
-        """
-        if not updates:
-            return
-        by_key = {}
-        for connection, rules in updates:
-            key = self._sidebar_connection_key(connection)
-            if key is not None:
-                by_key[key] = rules
-        try:
-            for conn, rows in list(getattr(self, 'connection_rows', {}).items()):
-                key = self._sidebar_connection_key(conn)
-                if key not in by_key:
-                    continue
-                rules = by_key[key]
-                # Most hosts have no rules, and a row built without any
-                # already shows the right (absent) indicator.
-                had_rules = bool(getattr(conn, 'forwarding_rules', None))
-                try:
-                    object.__setattr__(conn, 'forwarding_rules', rules)
-                except Exception:
-                    pass
-                if not rules and not had_rules:
-                    continue
-                for row in (rows if isinstance(rows, list) else [rows]):
-                    if hasattr(row, '_update_forwarding_indicators'):
-                        row._update_forwarding_indicators()
-        except Exception:
-            logger.debug("Failed to refresh sidebar forwarding rows", exc_info=True)
-        for connection, rules in updates:
-            try:
-                object.__setattr__(connection, 'forwarding_rules', rules)
+                object.__setattr__(
+                    connection,
+                    'forwarding_rules',
+                    tuple(forwarding_rule_to_dict(rule) for rule in forwards),
+                )
             except Exception:
                 pass
 
@@ -4585,7 +4371,6 @@ class MainWindow(Adw.ApplicationWindow, WindowBroadcastMixin, WindowSessionMixin
                     conn, 'tags', effective_tags([], getattr(conn, 'protocol', None))
                 )
         self._attach_sidebar_forwarding_rules(connections)
-        self._schedule_sidebar_forwarding_refresh()
         connections_dict = {conn.nickname: conn for conn in connections}
         connections_dict.update(
             {

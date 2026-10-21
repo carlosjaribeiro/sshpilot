@@ -1,5 +1,5 @@
 {
-  "api_implementation_version": "0.85",
+  "api_implementation_version": "0.86",
   "client_method_contract": {
     "add_agent_key": {
       "capability": "identity.operate",
@@ -2668,6 +2668,13 @@
         },
         {
           "default": [],
+          "name": "forwards",
+          "required": false,
+          "sensitive": false,
+          "type": "tuple[ForwardingRule, ...]"
+        },
+        {
+          "default": [],
           "name": "aliases",
           "required": false,
           "sensitive": false,
@@ -2843,6 +2850,13 @@
           "required": false,
           "sensitive": false,
           "type": "str"
+        },
+        {
+          "default": [],
+          "name": "forwards",
+          "required": false,
+          "sensitive": false,
+          "type": "tuple[ForwardingRule, ...]"
         },
         {
           "default": [],
@@ -3309,6 +3323,13 @@
           "required": false,
           "sensitive": false,
           "type": "str"
+        },
+        {
+          "default": [],
+          "name": "forwards",
+          "required": false,
+          "sensitive": false,
+          "type": "tuple[ForwardingRule, ...]"
         }
       ],
       "status": "Implemented"

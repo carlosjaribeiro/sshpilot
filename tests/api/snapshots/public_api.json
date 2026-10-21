@@ -13,7 +13,7 @@
     "Subscription",
     "TerminalSubscription"
   ],
-  "api_implementation_version": "0.85",
+  "api_implementation_version": "0.86",
   "capabilities": [
     "broadcast.events",
     "broadcast.read",
@@ -3959,6 +3959,7 @@
       "groups",
       "display_name",
       "target_summary",
+      "forwards",
       "aliases",
       "authentication_method",
       "identity_configured",
@@ -3987,6 +3988,7 @@
       "groups",
       "display_name",
       "target_summary",
+      "forwards",
       "aliases",
       "authentication_method",
       "identity_configured",
@@ -4059,7 +4061,8 @@
       "health",
       "groups",
       "display_name",
-      "target_summary"
+      "target_summary",
+      "forwards"
     ],
     "ConnectionValidationError": [
       "field",

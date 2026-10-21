@@ -699,6 +699,7 @@ Synthetic representation:
 | `groups` | `tuple[GroupReference, ...]` | No | `[]` | No |
 | `display_name` | `str` | No | `` | No |
 | `target_summary` | `str` | No | `` | No |
+| `forwards` | `tuple[ForwardingRule, ...]` | No | `[]` | No |
 | `aliases` | `tuple[str, ...]` | No | `[]` | No |
 | `authentication_method` | `AuthenticationMethod` | No | `key` | No |
 | `identity_configured` | `bool` | No | `false` | No |
@@ -717,6 +718,7 @@ Synthetic representation:
   "certificate_configured": false,
   "display_name": "",
   "forwarding_rule_count": 0,
+  "forwards": [],
   "groups": [],
   "health": "unknown",
   "host": "example",
@@ -794,6 +796,7 @@ untrusted consumers.  Gated behind ``CONNECTIONS_CONFIG_READ``.
 | `groups` | `tuple[GroupReference, ...]` | No | `[]` | No |
 | `display_name` | `str` | No | `` | No |
 | `target_summary` | `str` | No | `` | No |
+| `forwards` | `tuple[ForwardingRule, ...]` | No | `[]` | No |
 | `aliases` | `tuple[str, ...]` | No | `[]` | No |
 | `authentication_method` | `AuthenticationMethod` | No | `key` | No |
 | `identity_configured` | `bool` | No | `false` | No |
@@ -845,6 +848,7 @@ Synthetic representation:
   "forward_agent_target": "",
   "forwarding_rule_count": 0,
   "forwarding_rules": [],
+  "forwards": [],
   "generation": 0,
   "groups": [],
   "health": "unknown",
@@ -1020,12 +1024,14 @@ Synthetic representation:
 | `groups` | `tuple[GroupReference, ...]` | No | `[]` | No |
 | `display_name` | `str` | No | `` | No |
 | `target_summary` | `str` | No | `` | No |
+| `forwards` | `tuple[ForwardingRule, ...]` | No | `[]` | No |
 
 Synthetic representation:
 
 ```json
 {
   "display_name": "",
+  "forwards": [],
   "groups": [],
   "health": "unknown",
   "host": "example",

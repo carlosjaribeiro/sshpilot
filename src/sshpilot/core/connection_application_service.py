@@ -56,13 +56,12 @@ from ..api.models.connections import (
     DeleteConnectionResult,
     DeleteConnectionsRequest,
     DeleteConnectionsResult,
-    ForwardingRule,
     SaveSshConfigTextRequest,
     SplitConnectionRequest,
     SshConfigText,
     UpdateConnectionRequest,
     UNSET,
-    forwarding_rule_from_dict,
+    forwarding_rules_from_data,
 )
 from ..api.models.settings import (
     GlobalSshOverrides,
@@ -2201,20 +2200,7 @@ class ConnectionApplicationService:
     ) -> ConnectionEditorDetails:
         data = record.data or {}
         details = self._record_to_details(record)
-        forwarding_rules: Tuple[ForwardingRule, ...] = ()
-        raw_rules = data.get("forwarding_rules") or ()
-        if isinstance(raw_rules, (list, tuple)):
-            converted = []
-            for item in raw_rules:
-                if isinstance(item, ForwardingRule):
-                    converted.append(item)
-                    continue
-                if isinstance(item, dict):
-                    try:
-                        converted.append(forwarding_rule_from_dict(item))
-                    except (TypeError, ValueError):
-                        continue
-            forwarding_rules = tuple(converted)
+        forwarding_rules = forwarding_rules_from_data(data.get("forwarding_rules"))
         preferred = data.get("preferred_authentications")
         if isinstance(preferred, (list, tuple)):
             preferred_text = ",".join(str(p) for p in preferred)

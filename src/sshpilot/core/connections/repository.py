@@ -62,6 +62,7 @@ from ...api.models.connections import (
     SaveSshConfigTextRequest,
     SshConfigText,
     MAX_DISPLAY_NAME_LENGTH,
+    forwarding_rules_from_data,
     is_sensitive_field_name,
 )
 from ...api.models.common import validate_ssh_host_alias
@@ -484,6 +485,7 @@ class ConnectionRepository:
             groups=(),
             display_name=display_name,
             target_summary=target,
+            forwards=forwarding_rules_from_data(record.data.get("forwarding_rules")),
         )
 
     def discard_transient_connection(self, connection_id: str) -> bool:
@@ -1176,6 +1178,7 @@ class ConnectionRepository:
                 groups=groups,
                 display_name=_display_name_for_record(record),
                 target_summary=describe_target(record.protocol, record.data),
+                forwards=forwarding_rules_from_data(record.data.get("forwarding_rules")),
             )
 
         connections = tuple(_summary(r) for r in records)
@@ -1286,6 +1289,7 @@ class ConnectionRepository:
                     groups=groups_for_record,
                     display_name=_display_name_for_record(record, identity),
                     target_summary=describe_target(record.protocol, record.data),
+                    forwards=forwarding_rules_from_data(record.data.get("forwarding_rules")),
                 )
             )
         metadata = tuple(

@@ -1827,6 +1827,8 @@ def connection_summary_to_wire(summary: ConnectionSummary) -> Dict[str, Any]:
         # validates fields strictly still reads SSH-only lists.
         **({"target_summary": summary.target_summary}
            if summary.target_summary else {}),
+        **({"forwards": _forwarding_rules_to_wire(summary.forwards)}
+           if summary.forwards else {}),
     }
 
 
@@ -1847,7 +1849,7 @@ def connection_summary_from_wire(value: Any) -> ConnectionSummary:
     data = _strict_fields(
         value,
         required=_SUMMARY_FIELDS,
-        optional={"display_name", "target_summary"},
+        optional={"display_name", "target_summary", "forwards"},
         context="connection summary",
     )
     try:
@@ -1876,6 +1878,7 @@ def connection_summary_from_wire(value: Any) -> ConnectionSummary:
         target_summary=_text(
             data.get("target_summary", ""), "connection target summary", allow_empty=True
         ),
+        forwards=_forwarding_rules_from_wire(data.get("forwards")) or (),
     )
 
 
