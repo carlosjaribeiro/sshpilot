@@ -227,9 +227,28 @@ class GroupManager:
         self._refresh()
         return result
 
+    @property
+    def groups(self):
+        return self._groups
+
+    @groups.setter
+    def groups(self, value):
+        self._groups = value
+        # Rebuilt on the next lookup, once per projection rather than once per
+        # row: scanning every group's members for each of N rows was O(N*G).
+        self._groups_by_connection = None
+
     def get_connection_groups(self, connection) -> list[str]:
-        key = self.connection_key(connection)
-        return [group_id for group_id, group in self.groups.items() if key in group["connections"]]
+        index = self._groups_by_connection
+        if index is None:
+            index = {}
+            for group_id, group in self._groups.items():
+                for member in group["connections"]:
+                    owners = index.setdefault(str(member), [])
+                    if group_id not in owners:
+                        owners.append(group_id)
+            self._groups_by_connection = index
+        return list(index.get(self.connection_key(connection), ()))
 
     def get_connection_group(self, connection) -> Optional[str]:
         groups = self.get_connection_groups(connection)

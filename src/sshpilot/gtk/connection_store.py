@@ -51,6 +51,7 @@ class ConnectionPresentationStore:
         self._dispatch = dispatch or (lambda callback: callback())
         self._handlers = {}
         self._next_handler_id = 1
+        self._metadata_index = None
 
     def snapshot(self) -> ConnectionStoreSnapshot:
         with self._lock:
@@ -86,10 +87,17 @@ class ConnectionPresentationStore:
     find_connection_by_nickname = get_connection_by_id
 
     def get_metadata(self, connection_id: str):
-        return next(
-            (item.values for item in self.metadata if item.connection_id == connection_id),
-            {},
-        )
+        # Indexed once per immutable snapshot: a sidebar rebuild looks up every
+        # connection, and a linear scan each time made that O(N*M).
+        snapshot = self.snapshot()
+        cached = self._metadata_index
+        if cached is None or cached[0] is not snapshot:
+            index = {}
+            for item in snapshot.metadata:
+                index.setdefault(item.connection_id, item.values)
+            cached = (snapshot, index)
+            self._metadata_index = cached
+        return cached[1].get(connection_id, {})
 
     def get_connection_groups(self, connection_id: str):
         return tuple(
