@@ -1946,11 +1946,11 @@ def connection_details_from_wire(value: Any) -> ConnectionDetails:
     data = _strict_fields(
         value,
         required=_SUMMARY_FIELDS | detail_fields,
-        optional={"display_name", "target_summary", "plugin_data"},
+        optional={"display_name", "target_summary", "forwards", "plugin_data"},
         context="connection details",
     )
     summary_payload = {key: data[key] for key in _SUMMARY_FIELDS}
-    for key in ("display_name", "target_summary"):
+    for key in ("display_name", "target_summary", "forwards"):
         if key in data:
             summary_payload[key] = data[key]
     summary = connection_summary_from_wire(summary_payload)
@@ -1979,6 +1979,7 @@ def connection_details_from_wire(value: Any) -> ConnectionDetails:
         # and a plugin editor saved that back over the user's own name.
         display_name=summary.display_name,
         target_summary=summary.target_summary,
+        forwards=summary.forwards,
         aliases=aliases,
         authentication_method=authentication_method,
         identity_configured=_boolean(
@@ -2273,11 +2274,13 @@ def connection_editor_details_from_wire(
         required=summary_fields | _EDITOR_DETAIL_FIELDS,
         # Additive: a daemon predating authorship evidence simply omits it, and
         # an empty tuple already means "no evidence".
-        optional={"display_name", "target_summary", "authored_directives", "plugin_data"},
+        optional={
+            "display_name", "target_summary", "forwards", "authored_directives", "plugin_data",
+        },
         context="connection editor details",
     )
     summary_payload = {key: data[key] for key in summary_fields}
-    for key in ("display_name", "target_summary"):
+    for key in ("display_name", "target_summary", "forwards"):
         if key in data:
             summary_payload[key] = data[key]
     summary = connection_summary_from_wire(summary_payload)
@@ -2320,6 +2323,7 @@ def connection_editor_details_from_wire(
         health=summary.health,
         groups=summary.groups,
         display_name=summary.display_name,
+        forwards=summary.forwards,
         aliases=aliases,
         authentication_method=authentication_method,
         identity_configured=_boolean(data["identity_configured"], "identity configured"),

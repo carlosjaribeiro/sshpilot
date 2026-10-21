@@ -89,14 +89,18 @@ class ConnectionPresentationStore:
     def get_metadata(self, connection_id: str):
         # Indexed once per immutable snapshot: a sidebar rebuild looks up every
         # connection, and a linear scan each time made that O(N*M).
-        snapshot = self.snapshot()
-        cached = self._metadata_index
-        if cached is None or cached[0] is not snapshot:
-            index = {}
-            for item in snapshot.metadata:
-                index.setdefault(item.connection_id, item.values)
-            cached = (snapshot, index)
-            self._metadata_index = cached
+        # Built under the lock so it always pairs with the snapshot in force;
+        # events replace the snapshot too, so it is keyed on the snapshot
+        # rather than rebuilt in _install_snapshot.
+        with self._lock:
+            snapshot = self._store_snapshot
+            cached = self._metadata_index
+            if cached is None or cached[0] is not snapshot:
+                index = {}
+                for item in snapshot.metadata:
+                    index.setdefault(item.connection_id, item.values)
+                cached = (snapshot, index)
+                self._metadata_index = cached
         return cached[1].get(connection_id, {})
 
     def get_connection_groups(self, connection_id: str):

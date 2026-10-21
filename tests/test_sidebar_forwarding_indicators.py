@@ -181,3 +181,177 @@ def test_repository_snapshot_carries_ssh_config_forwards(tmp_path):
         80,
     )
     assert by_nickname["beta"].forwards == ()
+
+
+def _forwarding_service(tmp_path):
+    from sshpilot.core.connection_application_service import (
+        ConnectionApplicationService,
+    )
+    from sshpilot.core.connections.repository import ConnectionRepository
+    from sshpilot.core.connections.ssh_config_store import SshConfigStore
+
+    root = tmp_path / "ssh_config"
+    root.write_text(
+        "Host alpha\n"
+        "    HostName alpha.example\n"
+        "    LocalForward 8080 localhost:80\n"
+    )
+    repo = ConnectionRepository(
+        ssh_store=SshConfigStore(root, isolated=False),
+        state_path=tmp_path / "connections.json",
+        legacy_config_path=tmp_path / "config.json",
+        isolated=False,
+    )
+    return ConnectionApplicationService(repo, client_name="test")
+
+
+def test_details_carry_and_round_trip_forwards(tmp_path):
+    """``ConnectionDetails`` inherits ``forwards``: produce and decode it."""
+    from sshpilot.api.transport.codec import (
+        connection_details_from_wire,
+        connection_details_to_wire,
+    )
+
+    service = _forwarding_service(tmp_path)
+    details = service.get_connection("alpha")
+
+    assert [rule.listen_port for rule in details.forwards] == [8080]
+    wire = json.loads(json.dumps(connection_details_to_wire(details)))
+    assert connection_details_from_wire(wire) == details
+
+
+def test_editor_details_carry_and_round_trip_forwards(tmp_path):
+    from sshpilot.api.transport.codec import (
+        connection_editor_details_from_wire,
+        connection_editor_details_to_wire,
+    )
+
+    service = _forwarding_service(tmp_path)
+    editor = service.get_connection_editor("alpha")
+
+    assert editor.forwards == editor.forwarding_rules != ()
+    wire = json.loads(json.dumps(connection_editor_details_to_wire(editor)))
+    assert connection_editor_details_from_wire(wire) == editor
+
+
+def test_details_decoders_accept_forwards():
+    from sshpilot.api.models.connections import (
+        AuthenticationMethod,
+        ConnectionDetails,
+        ConnectionEditorDetails,
+    )
+    from sshpilot.api.transport import codec
+
+    fields = dict(
+        id="alpha",
+        nickname="alpha",
+        host="host",
+        hostname="host.example",
+        username="alice",
+        port=22,
+        authentication_method=AuthenticationMethod.KEY,
+        forwards=(local_rule,),
+    )
+    for model, encode, decode in (
+        (
+            ConnectionDetails,
+            codec.connection_details_to_wire,
+            codec.connection_details_from_wire,
+        ),
+        (
+            ConnectionEditorDetails,
+            codec.connection_editor_details_to_wire,
+            codec.connection_editor_details_from_wire,
+        ),
+    ):
+        value = model(**fields)
+        assert decode(json.loads(json.dumps(encode(value)))) == value
+
+
+class _IndicatorBox:
+    def __init__(self):
+        self.children = []
+        self.visible = True
+
+    def get_first_child(self):
+        return self.children[0] if self.children else None
+
+    def remove(self, child):
+        self.children.remove(child)
+
+    def append(self, child):
+        self.children.append(child)
+
+    def set_visible(self, visible):
+        self.visible = visible
+
+
+class _Image:
+    def __init__(self, icon_name):
+        self.icon_name = icon_name
+        self.tooltip = None
+
+    def set_pixel_size(self, _size):
+        pass
+
+    def set_halign(self, _align):
+        pass
+
+    def set_valign(self, _align):
+        pass
+
+    def set_tooltip_text(self, text):
+        self.tooltip = text
+
+
+def _stub_ssh_row_dependencies(monkeypatch, icon_utils):
+    from sshpilot.plugins import registry
+    from sshpilot.plugins.api import Capability
+
+    monkeypatch.setattr(icon_utils, "new_image_from_icon_name", _Image)
+    # The protocol registry is only populated once the app loads its plugins.
+    monkeypatch.setattr(
+        registry,
+        "capabilities_for",
+        lambda _connection: frozenset({Capability.PORT_FORWARDING}),
+    )
+
+
+def test_row_for_a_forwarded_summary_shows_the_indicator(monkeypatch):
+    """End to end on the GTK side: summary ``forwards`` -> row icon + tooltip."""
+    from sshpilot import icon_utils
+    from sshpilot.sidebar import ConnectionRow
+    from sshpilot.window import MainWindow
+
+    _stub_ssh_row_dependencies(monkeypatch, icon_utils)
+    alpha = _connection("alpha", local_rule)
+    MainWindow._attach_sidebar_forwarding_rules([alpha])
+    row = ConnectionRow.__new__(ConnectionRow)
+    row.connection = alpha
+    row.config = SimpleNamespace(get_setting=lambda _key, default=None: default)
+    row.indicator_box = _IndicatorBox()
+
+    ConnectionRow._update_forwarding_indicators(row, refresh_tooltip=False)
+
+    assert len(row.indicator_box.children) == 1
+    image = row.indicator_box.children[0]
+    assert image.icon_name == "mail-forward-symbolic"
+    assert "8080" in image.tooltip and "localhost:80" in image.tooltip
+
+
+def test_row_for_a_summary_without_forwards_has_no_indicator(monkeypatch):
+    from sshpilot import icon_utils
+    from sshpilot.sidebar import ConnectionRow
+    from sshpilot.window import MainWindow
+
+    _stub_ssh_row_dependencies(monkeypatch, icon_utils)
+    beta = _connection("beta")
+    MainWindow._attach_sidebar_forwarding_rules([beta])
+    row = ConnectionRow.__new__(ConnectionRow)
+    row.connection = beta
+    row.config = SimpleNamespace(get_setting=lambda _key, default=None: default)
+    row.indicator_box = _IndicatorBox()
+
+    ConnectionRow._update_forwarding_indicators(row, refresh_tooltip=False)
+
+    assert row.indicator_box.children == []

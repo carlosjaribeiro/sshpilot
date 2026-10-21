@@ -236,6 +236,10 @@ class GroupManager:
         self._groups = value
         # Rebuilt on the next lookup, once per projection rather than once per
         # row: scanning every group's members for each of N rows was O(N*G).
+        # Membership is snapshot-owned and changes only by assigning ``groups``
+        # (see _refresh); reordering a ``connections`` list in place, as the
+        # sort does, leaves the index valid. Adding or removing members in
+        # place would not be seen: assign a new ``groups`` dict instead.
         self._groups_by_connection = None
 
     def get_connection_groups(self, connection) -> list[str]:

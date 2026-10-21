@@ -6,12 +6,16 @@ notes remain separate.
 ## Unreleased
 
 - `ConnectionSummary` gains `forwards`, the connection's `ForwardingRule`s
-  (secret-free: listen and target addresses and ports). It is sent as an
-  array only when non-empty, so an older client still reads lists without
-  forwarding rules. The sidebar's port-forwarding indicator now reads it from
-  the store snapshot instead of calling `get_connection_editor` once per SSH
-  connection after startup and after every store change. New field, so the
-  API implementation version is 0.86; Protocol remains 1.0.
+  (secret-free: listen and target addresses and ports), inherited and filled
+  by `ConnectionDetails` and `ConnectionEditorDetails` too. It is sent as an
+  array only when non-empty. A pre-0.86 client validates these payloads
+  strictly, so it can still read a list, snapshot, event or details payload
+  only when no connection in it has forwarding rules; one with rules is
+  rejected as an unsupported field. The sidebar's port-forwarding indicator
+  now reads `forwards` from the store snapshot instead of calling
+  `get_connection_editor` once per SSH connection after startup and after
+  every store change. New field, so the API implementation version is 0.86;
+  Protocol remains 1.0.
 
 - `SecretTransferMessageCode` gains four merge-restore warnings, returned in
   `SecretTransferResult.warnings` by every backup import in merge mode:

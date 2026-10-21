@@ -52,7 +52,6 @@ def _window(mode='compact', **pref_overrides):
     win.connection_manager = MagicMock()
     win.connection_manager.get_connections.return_value = []
     win._attach_sidebar_forwarding_rules = lambda *_a, **_k: None
-    win._refresh_sidebar_forwarding_rules = lambda *_a, **_k: None
     return win, win_mod.MainWindow, conn, group
 
 

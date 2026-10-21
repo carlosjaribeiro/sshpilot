@@ -108,7 +108,6 @@ def test_rebuild_pins_local_terminal_row_first(window_mod, sidebar_mod, monkeypa
     win._tag_filter = None
     win._search_popup = None
     win._attach_sidebar_forwarding_rules = lambda *_a, **_k: None
-    win._refresh_sidebar_forwarding_rules = lambda *_a, **_k: None
     win._finish_rebuild = lambda *_a, **_k: None
     win._apply_sidebar_row_actions = lambda *_a, **_k: None
 
@@ -192,7 +191,6 @@ def test_rebuild_omits_local_terminal_row_when_pref_disabled(
     win._tag_filter = None
     win._search_popup = None
     win._attach_sidebar_forwarding_rules = lambda *_a, **_k: None
-    win._refresh_sidebar_forwarding_rules = lambda *_a, **_k: None
     win._finish_rebuild = lambda *_a, **_k: None
     win._apply_sidebar_row_actions = lambda *_a, **_k: None
 
@@ -265,7 +263,6 @@ def test_rebuild_hides_local_terminal_row_when_search_mismatches(
     win._tag_filter = None
     win._search_popup = None
     win._attach_sidebar_forwarding_rules = lambda *_a, **_k: None
-    win._refresh_sidebar_forwarding_rules = lambda *_a, **_k: None
     win._finish_rebuild = lambda *_a, **_k: None
 
     win.rebuild_connection_list()
