@@ -62,6 +62,7 @@ from ..api.models.connections import (
     UpdateConnectionRequest,
     UNSET,
     forwarding_rules_from_data,
+    summary_changed,
 )
 from ..api.models.settings import (
     GlobalSshOverrides,
@@ -2001,7 +2002,7 @@ class ConnectionApplicationService:
         updated = [
             after[cid]
             for cid in after
-            if cid in before and before[cid] != after[cid]
+            if cid in before and summary_changed(before[cid], after[cid])
         ]
         for event_type, summaries in (
             (EventType.CONNECTION_DELETED, deleted),

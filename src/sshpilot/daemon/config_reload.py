@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, FrozenSet, Optional, Protocol
 
-from sshpilot.api.models.connections import ConnectionSummary
+from sshpilot.api.models.connections import ConnectionSummary, summary_changed
 from sshpilot.core.connections.repository import ConnectionRepository
 
 from .command_executor import BoundedCommandExecutor, DeferredCommand
@@ -214,7 +214,7 @@ class AuthoritativeConfigurationBackend:
         updated = tuple(
             after[key]
             for key in sorted(before.keys() & after.keys())
-            if before[key] != after[key]
+            if summary_changed(before[key], after[key])
         )
         unchanged = len(before.keys() & after.keys()) - len(updated)
         return ConnectionReloadResult(

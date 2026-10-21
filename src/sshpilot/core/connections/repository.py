@@ -3482,6 +3482,9 @@ class ConnectionRepository:
     ) -> bool:
         return (
             before.connections == after.connections
+            # ``forwards`` is outside summary equality; a rule edit is a change.
+            and [c.forwards for c in before.connections]
+            == [c.forwards for c in after.connections]
             and before.groups == after.groups
             and before.root_connection_ids == after.root_connection_ids
             and before.metadata == after.metadata

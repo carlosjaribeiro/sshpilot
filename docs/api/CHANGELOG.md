@@ -11,11 +11,13 @@ notes remain separate.
   array only when non-empty. A pre-0.86 client validates these payloads
   strictly, so it can still read a list, snapshot, event or details payload
   only when no connection in it has forwarding rules; one with rules is
-  rejected as an unsupported field. The sidebar's port-forwarding indicator
-  now reads `forwards` from the store snapshot instead of calling
-  `get_connection_editor` once per SSH connection after startup and after
-  every store change. New field, so the API implementation version is 0.86;
-  Protocol remains 1.0.
+  rejected as an unsupported field. `forwards` is excluded from model
+  equality and hashing (`field(compare=False)`), so a rule edit keeps a
+  summary's identity; use `summary_changed()` to detect it. The sidebar's
+  port-forwarding indicator now reads `forwards` from the store snapshot
+  instead of calling `get_connection_editor` once per SSH connection after
+  startup and after every store change. New field, so the API implementation
+  version is 0.86; Protocol remains 1.0.
 
 - `SecretTransferMessageCode` gains four merge-restore warnings, returned in
   `SecretTransferResult.warnings` by every backup import in merge mode:

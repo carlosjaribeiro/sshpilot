@@ -285,7 +285,10 @@ class ConnectionSummary:
     target_summary: str = ""
     #: The connection's port-forwarding rules, so a list view can show its
     #: forwarding indicator without fetching each connection's editor details.
-    forwards: Tuple[ForwardingRule, ...] = ()
+    #: Not part of equality or the hash: the GTK window keys rows and terminals
+    #: by summary, and a rule edit must not orphan a host's open terminals.
+    #: Change detection compares it explicitly (``summary_changed``).
+    forwards: Tuple[ForwardingRule, ...] = field(default=(), compare=False)
 
     def __post_init__(self) -> None:
         require_identifier(self.id, "connection id")
@@ -314,6 +317,11 @@ class ConnectionSummary:
     def display_target(self) -> str:
         host = self.hostname or self.host or self.nickname
         return f"{self.username}@{host}" if self.username else host
+
+
+def summary_changed(before: ConnectionSummary, after: ConnectionSummary) -> bool:
+    """Whether a connection changed, counting ``forwards`` (outside ``==``)."""
+    return before != after or before.forwards != after.forwards
 
 
 # Core identity columns persisted alongside plugin FieldSpec values. Excluded

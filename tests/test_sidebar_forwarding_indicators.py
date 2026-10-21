@@ -139,7 +139,9 @@ def test_summary_forwards_round_trip_through_the_wire():
 
     wire = json.loads(json.dumps(connection_summary_to_wire(summary)))
 
-    assert connection_summary_from_wire(wire) == summary
+    decoded = connection_summary_from_wire(wire)
+    assert decoded == summary
+    assert decoded.forwards == summary.forwards
 
 
 def test_summary_without_forwards_keeps_its_wire_shape():
@@ -217,7 +219,8 @@ def test_details_carry_and_round_trip_forwards(tmp_path):
 
     assert [rule.listen_port for rule in details.forwards] == [8080]
     wire = json.loads(json.dumps(connection_details_to_wire(details)))
-    assert connection_details_from_wire(wire) == details
+    decoded = connection_details_from_wire(wire)
+    assert decoded == details and decoded.forwards == details.forwards
 
 
 def test_editor_details_carry_and_round_trip_forwards(tmp_path):
@@ -231,7 +234,8 @@ def test_editor_details_carry_and_round_trip_forwards(tmp_path):
 
     assert editor.forwards == editor.forwarding_rules != ()
     wire = json.loads(json.dumps(connection_editor_details_to_wire(editor)))
-    assert connection_editor_details_from_wire(wire) == editor
+    decoded = connection_editor_details_from_wire(wire)
+    assert decoded == editor and decoded.forwards == editor.forwards
 
 
 def test_details_decoders_accept_forwards():
@@ -265,7 +269,8 @@ def test_details_decoders_accept_forwards():
         ),
     ):
         value = model(**fields)
-        assert decode(json.loads(json.dumps(encode(value)))) == value
+        decoded = decode(json.loads(json.dumps(encode(value))))
+        assert decoded == value and decoded.forwards == value.forwards
 
 
 class _IndicatorBox:
@@ -355,3 +360,71 @@ def test_row_for_a_summary_without_forwards_has_no_indicator(monkeypatch):
     ConnectionRow._update_forwarding_indicators(row, refresh_tooltip=False)
 
     assert row.indicator_box.children == []
+
+
+def test_rule_edit_keeps_the_summary_identity_open_terminals_are_keyed_by():
+    """Rows and terminals are keyed by summary; rule edits must not orphan them."""
+    before = _connection("alpha", local_rule)
+    after = _connection("alpha", local_rule, dynamic_rule)
+    terminals = {before: "terminal"}
+
+    assert after == before and hash(after) == hash(before)
+    assert terminals[after] == "terminal"
+
+
+def test_rule_edit_is_still_a_change_everywhere_changes_are_detected(tmp_path):
+    from sshpilot.api.models.connections import summary_changed
+    from sshpilot.daemon.config_reload import AuthoritativeConfigurationBackend
+
+    service = _forwarding_service(tmp_path)
+    repo = service._repository
+    root = tmp_path / "ssh_config"
+    before = repo.snapshot()
+    published = []
+    service._publisher.publish = (
+        lambda event_type, payload, **_kw: published.append((event_type.value, payload))
+    )
+
+    root.write_text(root.read_text().replace("LocalForward 8080", "LocalForward 9090"))
+    result = AuthoritativeConfigurationBackend(repo).reload()
+    after = repo.snapshot()
+
+    assert [r.listen_port for r in after.connections[0].forwards] == [9090]
+    assert after.generation > before.generation  # published, not swallowed
+    assert summary_changed(before.connections[0], after.connections[0])
+    assert [c.nickname for c in result.updated] == ["alpha"]
+    # The repository listener turned the reload into a per-connection event.
+    assert ("connection.updated", after.connections[0]) in published
+
+
+def test_rule_only_edit_reaches_the_sidebar_as_a_projection_reset(tmp_path):
+    """The sidebar learns new rules from a reset + rebuild, not in place.
+
+    A coherent client (the daemon client has ``get_connection_store_snapshot``)
+    applies only ``connection_store.changed``, which the service publishes
+    after every repository change, so rows are rebuilt from fresh summaries.
+    """
+    from sshpilot.daemon.config_reload import AuthoritativeConfigurationBackend
+    from sshpilot.gtk.connection_store import ConnectionPresentationStore
+    from sshpilot.window import MainWindow
+
+    service = _forwarding_service(tmp_path)
+    repo = service._repository
+    client = SimpleNamespace(
+        server_instance_id=None,
+        get_connection_store_snapshot=repo.snapshot,
+        subscribe_events=service.subscribe_events,
+    )
+    store = ConnectionPresentationStore()
+    store.attach_client(client)
+    resets = []
+    store.connect_after("projection-reset", lambda *_a: resets.append(True))
+    root = tmp_path / "ssh_config"
+
+    root.write_text(root.read_text().replace("LocalForward 8080", "LocalForward 9090"))
+    AuthoritativeConfigurationBackend(repo).reload()
+
+    assert resets
+    connections = list(store.get_connections())
+    MainWindow._attach_sidebar_forwarding_rules(connections)
+    assert [rule["listen_port"] for rule in connections[0].forwarding_rules] == [9090]
