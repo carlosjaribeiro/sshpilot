@@ -1373,10 +1373,12 @@ class TerminalWidget(Gtk.Box):
                         pass
         if forwarding_only:
             self._update_forwarding_only_tab_title()
-            if self._has_connected_status_evidence():
-                self._show_post_connect_overlay()
-            elif self._overlay_mode in ("none", "forwarding"):
-                self._set_session_overlay_mode("connecting")
+        if self._has_connected_status_evidence():
+            # The session may have reported RUNNING while this was unresolved,
+            # leaving the veil up; settle the overlay now either way.
+            self._show_post_connect_overlay()
+        elif forwarding_only and self._overlay_mode in ("none", "forwarding"):
+            self._set_session_overlay_mode("connecting")
 
     def ensure_forwarding_only_context(self, client=None, bridge=None) -> None:
         """Resolve SessionType none + rules if not already known on the connection."""
@@ -1415,6 +1417,8 @@ class TerminalWidget(Gtk.Box):
 
             def on_error(_error):
                 self._forwarding_only_known = False
+                if self._has_connected_status_evidence():
+                    self._show_post_connect_overlay()
 
             bridge.submit(
                 lambda: client.get_connection_editor(connection_id),
@@ -1764,6 +1768,9 @@ class TerminalWidget(Gtk.Box):
             self.connection_state = self.connection_state.__class__.CONNECTING
             self.connection_state_reason = "Attaching to daemon session..."
             self._set_connecting_overlay_visible(True)
+            # As on open: until SessionType is resolved, the post-connect
+            # overlay keeps the veil up, so a re-attached tab must resolve it.
+            self.ensure_forwarding_only_context(client, bridge)
             self._install_daemon_backend_io()
             self._daemon_controller.attach(
                 want_output=True,

@@ -217,3 +217,69 @@ def test_connecting_mode_hides_forwarding_box():
     assert term._overlay_mode == "connecting"
     term.forwarding_box.set_visible.assert_called_with(False)
     term.connecting_box.set_visible.assert_called_with(True)
+
+
+def test_attaching_a_daemon_session_resolves_forwarding_only(monkeypatch):
+    """A restored or re-attached tab must resolve SessionType like an opened
+    one: the sidebar no longer fetches every connection's editor details, so
+    nothing else will, and an unresolved flag keeps the Connecting veil up."""
+    import sshpilot.daemon_interaction_dialogs as dialogs_module
+    import sshpilot.terminal_session_controller as controller_module
+
+    class _Controller:
+        def __init__(self, **_kwargs):
+            self.tab_state = SimpleNamespace(session_id=None, state=None)
+            self.session_running = False
+
+        def attach(self, **_kwargs):
+            pass
+
+    monkeypatch.setattr(controller_module, "DaemonTerminalSessionController", _Controller)
+    monkeypatch.setattr(
+        dialogs_module,
+        "DaemonInteractionDialogs",
+        lambda *_a: SimpleNamespace(set_session=lambda _sid: None),
+    )
+    term = _bare_terminal(SimpleNamespace(nickname="tunnel"))
+    term.session_id = "s"
+    term._daemon_tab_state = None
+    term.backend = None
+    term._set_connecting_overlay_visible = lambda _visible: None
+    term._install_daemon_backend_io = lambda: None
+    resolved = []
+    term.ensure_forwarding_only_context = (
+        lambda client, bridge: resolved.append((client, bridge))
+    )
+    client, bridge = object(), object()
+
+    assert term.attach_daemon_session(client, bridge, "session-1", connection_id="tunnel")
+
+    assert resolved == [(client, bridge)]
+
+
+def test_late_normal_shell_resolution_clears_the_veil_after_running():
+    term = _bare_terminal(SimpleNamespace(nickname="shell"))
+    term._daemon_mode = True
+    term._daemon_controller = SimpleNamespace(session_running=True)
+    term._show_post_connect_overlay()
+    assert term._overlay_mode == "connecting"
+
+    term.apply_forwarding_only_context(forwarding_only=False, rules=())
+
+    assert term._overlay_mode == "none"
+
+
+def test_failed_resolution_clears_the_veil_after_running():
+    term = _bare_terminal(SimpleNamespace(nickname="shell"))
+    term._daemon_mode = True
+    term._daemon_controller = SimpleNamespace(session_running=True)
+    term._show_post_connect_overlay()
+    assert term._overlay_mode == "connecting"
+
+    class _FailingBridge:
+        def submit(self, _operation, *, on_success, on_error):
+            on_error(RuntimeError("boom"))
+
+    term.ensure_forwarding_only_context(SimpleNamespace(), _FailingBridge())
+
+    assert term._overlay_mode == "none"
